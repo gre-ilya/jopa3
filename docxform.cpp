@@ -52,6 +52,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include "docxform.h"
 #include "tablekinds.h"
 
 namespace {
@@ -793,7 +794,7 @@ public:
                 QString::fromUtf8("— Переменные {{…}} —"), container));
         }
         // One block per paragraph: the paragraph text (its variables
-        // highlighted) shown once, then an input field for each of them.
+        // highlighted) shown once, then an input field for each variable.
         for (const ParaGroup& g : groups_) {
             std::set<std::string> hl(g.vars.begin(), g.vars.end());
             auto* ctx = new QLabel(paragraphHtml(g.text, hl), container);
@@ -801,11 +802,17 @@ public:
             ctx->setWordWrap(true);
             ctx->setStyleSheet("color:#555; margin-top:8px;");
             form->addRow(ctx);  // full-width context line
+
             for (const std::string& name : g.vars) {
+                QString qname = QString::fromStdString(name);
                 auto* edit = new QLineEdit(container);
-                edit->setPlaceholderText(QString::fromUtf8("значение для %1")
-                                             .arg(QString::fromStdString(name)));
-                form->addRow(QString::fromStdString(name), edit);
+                // Short, clean prompt inside the field (a long paragraph would be
+                // clipped by the single-line edit); the full guidance lives in
+                // the tooltip.
+                edit->setPlaceholderText(
+                    QString::fromUtf8("значение для %1").arg(qname));
+                edit->setToolTip(fieldHintHtml(name));
+                form->addRow(qname, edit);
                 edits_.emplace_back(name, edit);
             }
         }
@@ -865,6 +872,26 @@ private:
         }
         html += QString::fromStdString(text.substr(cur)).toHtmlEscaped();
         return html;
+    }
+
+    // The general filling rules, shared by every field. Kept as one paragraph so
+    // the help text and the per-field tooltip stay in sync.
+    static QString fillingRules() {
+        return QString::fromUtf8(
+            "Введённое значение подставляется как есть во всех местах документа, "
+            "где встречается этот плейсхолдер, поэтому обратите внимание на "
+            "регистр, пробелы и знаки препинания. Если оставить поле пустым, "
+            "плейсхолдер будет удалён из итогового файла.");
+    }
+
+    // Full guidance for one variable — used as the field's tooltip. A whole
+    // paragraph rather than a single sentence.
+    static QString fieldHintHtml(const std::string& name) {
+        QString qname = QString::fromStdString(name).toHtmlEscaped();
+        return QString::fromUtf8(
+                   "<b>%1</b> — введите значение для переменной "
+                   "<code>{{%1}}</code>. %2")
+            .arg(qname, fillingRules());
     }
 
     void onGenerate() {
@@ -928,6 +955,36 @@ private:
 };
 
 }  // namespace
+
+// ---- Public embedding API (see docxform.h) --------------------------------
+
+namespace docxform {
+
+QWidget* openTemplateForm(const QString& templatePath, QString* error,
+                          QWidget* parent) {
+    auto fail = [&](const QString& msg) -> QWidget* {
+        if (error) *error = msg;
+        return nullptr;
+    };
+
+    std::string zip;
+    if (!readWholeFile(templatePath.toStdString(), zip))
+        return fail(QString::fromUtf8("Не удалось открыть файл:\n%1")
+                        .arg(templatePath));
+    std::string xml;
+    if (!extractZipMember(zip, "word/document.xml", xml))
+        return fail(QString::fromUtf8(
+            "Это не похоже на .docx (нет word/document.xml)."));
+
+    std::vector<ParaGroup> groups = collectVarGroups(xml);
+    std::vector<std::string> tables = collectTables(xml);
+    auto* w = new FormWindow(templatePath, std::move(zip), std::move(xml),
+                             std::move(groups), std::move(tables));
+    if (parent) w->setParent(parent, w->windowFlags());
+    return w;
+}
+
+}  // namespace docxform
 
 // Headless: list each {{variable}} with its context sentence, then each
 // \table{name} placeholder. Useful for inspection/integration.
@@ -1010,6 +1067,9 @@ int renderHeadless(int argc, char** argv) {
     return 0;
 }
 
+// The standalone executable's entry point. Define DOCXFORM_NO_MAIN when reusing
+// docxform.cpp as a library inside another program (which has its own main()).
+#ifndef DOCXFORM_NO_MAIN
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "--render") == 0)
         return renderHeadless(argc, argv);
@@ -1027,25 +1087,14 @@ int main(int argc, char** argv) {
             QString::fromUtf8("Документ Word (*.docx)"));
     if (path.isEmpty()) return 0;
 
-    std::string zip;
-    if (!readWholeFile(path.toStdString(), zip)) {
-        QMessageBox::critical(
-            nullptr, QString::fromUtf8("Ошибка"),
-            QString::fromUtf8("Не удалось открыть файл:\n%1").arg(path));
+    QString err;
+    QWidget* w = docxform::openTemplateForm(path, &err);
+    if (!w) {
+        QMessageBox::critical(nullptr, QString::fromUtf8("Ошибка"), err);
         return 1;
     }
-    std::string xml;
-    if (!extractZipMember(zip, "word/document.xml", xml)) {
-        QMessageBox::critical(
-            nullptr, QString::fromUtf8("Ошибка"),
-            QString::fromUtf8("Это не похоже на .docx (нет word/document.xml)."));
-        return 1;
-    }
-
-    std::vector<ParaGroup> groups = collectVarGroups(xml);
-    std::vector<std::string> tables = collectTables(xml);
-    FormWindow w(path, std::move(zip), std::move(xml), std::move(groups),
-                 std::move(tables));
-    w.show();
+    w->setAttribute(Qt::WA_DeleteOnClose);
+    w->show();
     return app.exec();
 }
+#endif  // DOCXFORM_NO_MAIN
