@@ -794,8 +794,7 @@ public:
                 QString::fromUtf8("— Переменные {{…}} —"), container));
         }
         // One block per paragraph: the paragraph text (its variables
-        // highlighted) shown once, then a help paragraph for the block, then an
-        // input field for each variable.
+        // highlighted) shown once, then an input field for each variable.
         for (const ParaGroup& g : groups_) {
             std::set<std::string> hl(g.vars.begin(), g.vars.end());
             auto* ctx = new QLabel(paragraphHtml(g.text, hl), container);
@@ -804,21 +803,12 @@ public:
             ctx->setStyleSheet("color:#555; margin-top:8px;");
             form->addRow(ctx);  // full-width context line
 
-            // A single help paragraph for the whole block. It adapts to how many
-            // variables this paragraph introduces, so the multi-variable case
-            // reads naturally instead of repeating the same hint on every field.
-            auto* help = new QLabel(blockHelpHtml(g.vars), container);
-            help->setTextFormat(Qt::RichText);
-            help->setWordWrap(true);
-            help->setStyleSheet("color:#777; font-size:11px; margin-bottom:6px;");
-            form->addRow(help);
-
             for (const std::string& name : g.vars) {
                 QString qname = QString::fromStdString(name);
                 auto* edit = new QLineEdit(container);
                 // Short, clean prompt inside the field (a long paragraph would be
                 // clipped by the single-line edit); the full guidance lives in
-                // the tooltip and the block help above.
+                // the tooltip.
                 edit->setPlaceholderText(
                     QString::fromUtf8("значение для %1").arg(qname));
                 edit->setToolTip(fieldHintHtml(name));
@@ -902,31 +892,6 @@ private:
                    "<b>%1</b> — введите значение для переменной "
                    "<code>{{%1}}</code>. %2")
             .arg(qname, fillingRules());
-    }
-
-    // One help paragraph for a whole paragraph block. It adapts to the number of
-    // variables: a single variable reads as a plain instruction, while several
-    // variables are listed and the user is told that each has its own field.
-    static QString blockHelpHtml(const std::vector<std::string>& vars) {
-        auto code = [](const std::string& n) {
-            return "<code>{{" + QString::fromStdString(n).toHtmlEscaped() +
-                   "}}</code>";
-        };
-        if (vars.size() == 1)
-            return QString::fromUtf8("Заполните поле для переменной %1. %2")
-                .arg(code(vars.front()), fillingRules());
-
-        QString list;
-        for (size_t i = 0; i < vars.size(); ++i) {
-            if (i) list += (i + 1 == vars.size())
-                               ? QString::fromUtf8(" и ")
-                               : QString::fromUtf8(", ");
-            list += code(vars[i]);
-        }
-        return QString::fromUtf8(
-                   "В этом абзаце несколько переменных: %1. Для каждой ниже "
-                   "есть отдельное поле — заполните их по очереди. %2")
-            .arg(list, fillingRules());
     }
 
     void onGenerate() {
