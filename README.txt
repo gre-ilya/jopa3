@@ -272,7 +272,13 @@ _template (например, для contract.docx — contract_template.docx). �
   - Qt5 (модуль Widgets) и заголовки к нему.
       Ubuntu/Debian:  sudo apt install qtbase5-dev
       Fedora:         sudo dnf install qt5-qtbase-devel
+  - pkg-config — нужен для сборки через Makefile (читает Qt-флаги).
+      Ubuntu/Debian:  sudo apt install pkg-config
+      Fedora:         sudo dnf install pkgconf-pkg-config
   - Библиотека zlib (как у остальных инструментов).
+
+  (pkg-config нужен только для docxform; docx2txt и txt2docx собираются и
+   без него. Проверить Qt: pkg-config --modversion Qt5Widgets)
 
 
 СБОРКА
