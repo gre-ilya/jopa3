@@ -14,16 +14,18 @@ CXX      ?= g++
 CXXFLAGS ?= -O2 -std=c++17
 LDLIBS   := -lz
 
-# GCC 8 and older (and old Clang) keep std::filesystem in a separate library,
-# so they need -lstdc++fs at link time. Detect this by trying to link a tiny
-# std::filesystem program without the flag: if that fails, add the flag.
-# Newer toolchains link fine without it, so it is omitted there.
-FS_CHECK := $(shell t=$$(mktemp --suffix=.cpp 2>/dev/null || echo /tmp/.fscheck.cpp); \
-	printf '#include <filesystem>\nint main(){return std::filesystem::exists("/")?0:1;}\n' > $$t; \
-	if $(CXX) $(CXXFLAGS) $$t -o /dev/null >/dev/null 2>&1; then echo no; else echo yes; fi; \
-	rm -f $$t)
-ifeq ($(FS_CHECK),yes)
+# GCC 8 and older keep std::filesystem in a separate library and need
+# -lstdc++fs at link time; GCC 9+ and Clang do not. Detect the GCC major
+# version (kept paren-free so every make/shell parses it cleanly). Clang is
+# skipped, since it does not ship libstdc++fs. Override LDLIBS to force it.
+IS_CLANG   := $(shell $(CXX) -dM -E -x c++ /dev/null 2>/dev/null | grep __clang__)
+GCC_MAJOR  := $(shell $(CXX) -dumpversion 2>/dev/null | cut -d. -f1)
+ifeq ($(IS_CLANG),)
+ifneq ($(GCC_MAJOR),)
+ifeq ($(shell test $(GCC_MAJOR) -lt 9 2>/dev/null && echo yes),yes)
 LDLIBS += -lstdc++fs
+endif
+endif
 endif
 
 # Qt5 flags for the GUI tool (docxform), resolved via pkg-config.
