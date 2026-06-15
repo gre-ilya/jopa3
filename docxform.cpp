@@ -711,27 +711,8 @@ std::vector<std::string> collectTables(const std::string& xml) {
     return order;
 }
 
-// Extract the WHOLE sentence containing the byte range [b,e) in the paragraph
-// text P: from just after the previous .!? (or line break / paragraph start) to
-// the end of the sentence (its terminator included). Placeholder tokens are
-// kept verbatim so the GUI can highlight them.
-std::string sentenceAround(const std::string& P, size_t b, size_t e) {
-    auto isEnd = [](char c) {
-        return c == '.' || c == '!' || c == '?' || c == '\n' || c == '\r';
-    };
-    size_t left = b;
-    while (left > 0 && !isEnd(P[left - 1])) --left;
-    size_t right = e;
-    while (right < P.size() && !isEnd(P[right])) ++right;
-    if (right < P.size()) ++right;  // include the terminating .!?
-    while (left < b && std::isspace(static_cast<unsigned char>(P[left]))) ++left;
-    while (right > e && std::isspace(static_cast<unsigned char>(P[right - 1])))
-        --right;
-    return P.substr(left, right - left);
-}
-
-// Collect {{variable}} names with the sentence each first appears in, in
-// first-seen order (unique by name).
+// Collect {{variable}} names with the paragraph each first appears in (used as
+// context in the GUI), in first-seen order (unique by name).
 std::vector<std::pair<std::string, std::string>> collectVarsWithContext(
     const std::string& xml) {
     std::vector<std::pair<std::string, std::string>> out;
@@ -748,8 +729,9 @@ std::vector<std::pair<std::string, std::string>> collectVarsWithContext(
             size_t pos = 0, b, en;
             std::string name;
             while (nextPlaceholder(P, pos, b, en, name)) {
-                if (seen.insert(name).second)
-                    out.emplace_back(name, sentenceAround(P, b, en));
+                // Context = the whole paragraph the variable lives in, so the
+                // hint shows the full text both BEFORE and AFTER the variable.
+                if (seen.insert(name).second) out.emplace_back(name, P);
                 pos = en;
             }
             i = close;
