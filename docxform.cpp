@@ -711,11 +711,18 @@ std::vector<std::string> collectTables(const std::string& xml) {
     return order;
 }
 
-// Collect {{variable}} names with the paragraph each first appears in (used as
-// context in the GUI), in first-seen order (unique by name).
-std::vector<std::pair<std::string, std::string>> collectVarsWithContext(
-    const std::string& xml) {
-    std::vector<std::pair<std::string, std::string>> out;
+// A paragraph that introduces one or more {{variables}}: the paragraph text
+// (placeholder tokens kept) and the new variable names it introduces, in order.
+struct ParaGroup {
+    std::string text;
+    std::vector<std::string> vars;
+};
+
+// Group variables by the paragraph they FIRST appear in. Each variable is
+// listed once (globally), under the paragraph that introduced it; paragraphs
+// without any new variable are skipped. This drives the grouped GUI layout.
+std::vector<ParaGroup> collectVarGroups(const std::string& xml) {
+    std::vector<ParaGroup> groups;
     std::set<std::string> seen;
     size_t i = 0;
     while ((i = xml.find('<', i)) != std::string::npos) {
@@ -726,14 +733,14 @@ std::vector<std::pair<std::string, std::string>> collectVarsWithContext(
             size_t close = findClose(xml, e + 1, "p");
             if (close == std::string::npos) break;
             std::string P = concatParagraphText(xml.substr(e + 1, close - e - 1));
+            std::vector<std::string> newVars;
             size_t pos = 0, b, en;
             std::string name;
             while (nextPlaceholder(P, pos, b, en, name)) {
-                // Context = the whole paragraph the variable lives in, so the
-                // hint shows the full text both BEFORE and AFTER the variable.
-                if (seen.insert(name).second) out.emplace_back(name, P);
+                if (seen.insert(name).second) newVars.push_back(name);
                 pos = en;
             }
+            if (!newVars.empty()) groups.push_back({P, std::move(newVars)});
             i = close;
             continue;
         }
@@ -741,7 +748,7 @@ std::vector<std::pair<std::string, std::string>> collectVarsWithContext(
         if (e == std::string::npos) break;
         i = e + 1;
     }
-    return out;
+    return groups;
 }
 
 // ---- GUI ------------------------------------------------------------------
@@ -753,23 +760,25 @@ std::vector<std::pair<std::string, std::string>> collectVarsWithContext(
 class FormWindow : public QWidget {
 public:
     FormWindow(const QString& path, std::string zip, std::string xml,
-               std::vector<std::pair<std::string, std::string>> vars,
-               std::vector<std::string> tables)
+               std::vector<ParaGroup> groups, std::vector<std::string> tables)
         : path_(path),
           zip_(std::move(zip)),
           xml_(std::move(xml)),
-          vars_(std::move(vars)),
+          groups_(std::move(groups)),
           tables_(std::move(tables)),
           kinds_(docxform::tableKinds()) {
         setWindowTitle(QString::fromUtf8("docxform — шаблонизатор .docx"));
         resize(560, 540);
+
+        int varCount = 0;
+        for (const auto& g : groups_) varCount += static_cast<int>(g.vars.size());
 
         auto* root = new QVBoxLayout(this);
 
         QString head =
             QString::fromUtf8("Шаблон: %1\nПеременных: %2,  таблиц: %3")
                 .arg(QFileInfo(path_).fileName())
-                .arg(static_cast<int>(vars_.size()))
+                .arg(varCount)
                 .arg(static_cast<int>(tables_.size()));
         auto* header = new QLabel(head, this);
         header->setWordWrap(true);
@@ -779,35 +788,26 @@ public:
         auto* form = new QFormLayout(container);
         form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 
-        if (!vars_.empty()) {
-            auto* lbl = new QLabel(QString::fromUtf8("— Переменные {{…}} —"),
-                                   container);
-            form->addRow(lbl);
+        if (!groups_.empty()) {
+            form->addRow(new QLabel(
+                QString::fromUtf8("— Переменные {{…}} —"), container));
         }
-        for (const auto& v : vars_) {
-            const std::string& name = v.first;
-            const std::string& context = v.second;
-
-            // Field column = context sentence (with the placeholder shown) on
-            // top of the input box, so the user sees what they are filling in.
-            auto* fieldW = new QWidget(container);
-            auto* col = new QVBoxLayout(fieldW);
-            col->setContentsMargins(0, 0, 0, 0);
-            col->setSpacing(2);
-            if (!context.empty()) {
-                auto* ctx = new QLabel(contextHtml(context, name), fieldW);
-                ctx->setTextFormat(Qt::RichText);
-                ctx->setWordWrap(true);
-                ctx->setStyleSheet("color:#555;");
-                col->addWidget(ctx);
+        // One block per paragraph: the paragraph text (its variables
+        // highlighted) shown once, then an input field for each of them.
+        for (const ParaGroup& g : groups_) {
+            std::set<std::string> hl(g.vars.begin(), g.vars.end());
+            auto* ctx = new QLabel(paragraphHtml(g.text, hl), container);
+            ctx->setTextFormat(Qt::RichText);
+            ctx->setWordWrap(true);
+            ctx->setStyleSheet("color:#555; margin-top:8px;");
+            form->addRow(ctx);  // full-width context line
+            for (const std::string& name : g.vars) {
+                auto* edit = new QLineEdit(container);
+                edit->setPlaceholderText(QString::fromUtf8("значение для %1")
+                                             .arg(QString::fromStdString(name)));
+                form->addRow(QString::fromStdString(name), edit);
+                edits_.emplace_back(name, edit);
             }
-            auto* edit = new QLineEdit(fieldW);
-            edit->setPlaceholderText(QString::fromUtf8("значение для %1")
-                                         .arg(QString::fromStdString(name)));
-            col->addWidget(edit);
-
-            form->addRow(QString::fromStdString(name), fieldW);
-            edits_.emplace_back(name, edit);
         }
 
         if (!tables_.empty()) {
@@ -824,7 +824,7 @@ public:
             combos_.emplace_back(name, combo);
         }
 
-        if (vars_.empty() && tables_.empty()) {
+        if (groups_.empty() && tables_.empty()) {
             form->addRow(new QLabel(
                 QString::fromUtf8(
                     "В документе нет плейсхолдеров {{…}} или \\table{…}."),
@@ -844,18 +844,18 @@ public:
     }
 
 private:
-    // Render a context sentence as rich text: the current variable's
-    // placeholder is shown highlighted (the "blank" being filled), any other
-    // {{...}} in the sentence are greyed so they read as separate fields.
-    static QString contextHtml(const std::string& ctx,
-                               const std::string& thisName) {
+    // Render a paragraph as rich text: each {{name}} in `highlight` is shown as
+    // its name in a yellow box (the blanks to fill, matching the fields below);
+    // any other {{...}} is greyed.
+    static QString paragraphHtml(const std::string& text,
+                                 const std::set<std::string>& highlight) {
         QString html;
         size_t cur = 0, pos = 0, b, e;
         std::string nm;
-        while (nextPlaceholder(ctx, pos, b, e, nm)) {
-            html += QString::fromStdString(ctx.substr(cur, b - cur)).toHtmlEscaped();
+        while (nextPlaceholder(text, pos, b, e, nm)) {
+            html += QString::fromStdString(text.substr(cur, b - cur)).toHtmlEscaped();
             QString token = QString::fromStdString(nm).toHtmlEscaped();
-            if (nm == thisName)
+            if (highlight.count(nm))
                 html += "<span style=\"background-color:#fff3a0;font-weight:bold;"
                         "\">" + token + "</span>";
             else
@@ -863,7 +863,7 @@ private:
             cur = e;
             pos = e;
         }
-        html += QString::fromStdString(ctx.substr(cur)).toHtmlEscaped();
+        html += QString::fromStdString(text.substr(cur)).toHtmlEscaped();
         return html;
     }
 
@@ -920,7 +920,7 @@ private:
     QString path_;
     std::string zip_;
     std::string xml_;
-    std::vector<std::pair<std::string, std::string>> vars_;  // name, context
+    std::vector<ParaGroup> groups_;  // variables grouped by paragraph
     std::vector<std::string> tables_;
     std::vector<docxform::TableKind> kinds_;
     std::vector<std::pair<std::string, QLineEdit*>> edits_;
@@ -943,8 +943,9 @@ int listVars(int argc, char** argv) {
         std::fprintf(stderr, "Error: cannot read .docx '%s'\n", argv[2]);
         return 1;
     }
-    for (const auto& v : collectVarsWithContext(xml))
-        std::printf("VAR\t%s\t%s\n", v.first.c_str(), v.second.c_str());
+    for (const auto& g : collectVarGroups(xml))
+        for (const auto& name : g.vars)
+            std::printf("VAR\t%s\t%s\n", name.c_str(), g.text.c_str());
     for (const auto& t : collectTables(xml))
         std::printf("TABLE\t%s\n", t.c_str());
     return 0;
@@ -1041,10 +1042,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::vector<std::pair<std::string, std::string>> vars =
-        collectVarsWithContext(xml);
+    std::vector<ParaGroup> groups = collectVarGroups(xml);
     std::vector<std::string> tables = collectTables(xml);
-    FormWindow w(path, std::move(zip), std::move(xml), std::move(vars),
+    FormWindow w(path, std::move(zip), std::move(xml), std::move(groups),
                  std::move(tables));
     w.show();
     return app.exec();
