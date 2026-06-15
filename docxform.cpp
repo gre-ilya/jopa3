@@ -52,6 +52,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include "docxform.h"
 #include "tablekinds.h"
 
 namespace {
@@ -990,6 +991,36 @@ private:
 
 }  // namespace
 
+// ---- Public embedding API (see docxform.h) --------------------------------
+
+namespace docxform {
+
+QWidget* openTemplateForm(const QString& templatePath, QString* error,
+                          QWidget* parent) {
+    auto fail = [&](const QString& msg) -> QWidget* {
+        if (error) *error = msg;
+        return nullptr;
+    };
+
+    std::string zip;
+    if (!readWholeFile(templatePath.toStdString(), zip))
+        return fail(QString::fromUtf8("Не удалось открыть файл:\n%1")
+                        .arg(templatePath));
+    std::string xml;
+    if (!extractZipMember(zip, "word/document.xml", xml))
+        return fail(QString::fromUtf8(
+            "Это не похоже на .docx (нет word/document.xml)."));
+
+    std::vector<ParaGroup> groups = collectVarGroups(xml);
+    std::vector<std::string> tables = collectTables(xml);
+    auto* w = new FormWindow(templatePath, std::move(zip), std::move(xml),
+                             std::move(groups), std::move(tables));
+    if (parent) w->setParent(parent, w->windowFlags());
+    return w;
+}
+
+}  // namespace docxform
+
 // Headless: list each {{variable}} with its context sentence, then each
 // \table{name} placeholder. Useful for inspection/integration.
 //   docxform --vars <in.docx>
@@ -1071,6 +1102,9 @@ int renderHeadless(int argc, char** argv) {
     return 0;
 }
 
+// The standalone executable's entry point. Define DOCXFORM_NO_MAIN when reusing
+// docxform.cpp as a library inside another program (which has its own main()).
+#ifndef DOCXFORM_NO_MAIN
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "--render") == 0)
         return renderHeadless(argc, argv);
@@ -1088,25 +1122,14 @@ int main(int argc, char** argv) {
             QString::fromUtf8("Документ Word (*.docx)"));
     if (path.isEmpty()) return 0;
 
-    std::string zip;
-    if (!readWholeFile(path.toStdString(), zip)) {
-        QMessageBox::critical(
-            nullptr, QString::fromUtf8("Ошибка"),
-            QString::fromUtf8("Не удалось открыть файл:\n%1").arg(path));
+    QString err;
+    QWidget* w = docxform::openTemplateForm(path, &err);
+    if (!w) {
+        QMessageBox::critical(nullptr, QString::fromUtf8("Ошибка"), err);
         return 1;
     }
-    std::string xml;
-    if (!extractZipMember(zip, "word/document.xml", xml)) {
-        QMessageBox::critical(
-            nullptr, QString::fromUtf8("Ошибка"),
-            QString::fromUtf8("Это не похоже на .docx (нет word/document.xml)."));
-        return 1;
-    }
-
-    std::vector<ParaGroup> groups = collectVarGroups(xml);
-    std::vector<std::string> tables = collectTables(xml);
-    FormWindow w(path, std::move(zip), std::move(xml), std::move(groups),
-                 std::move(tables));
-    w.show();
+    w->setAttribute(Qt::WA_DeleteOnClose);
+    w->show();
     return app.exec();
 }
+#endif  // DOCXFORM_NO_MAIN

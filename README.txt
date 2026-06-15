@@ -349,6 +349,50 @@ tablekinds.cpp.
   ./docxform --vars <вход.docx>
 
 
+ВСТРАИВАНИЕ ОКНА В ДРУГУЮ ПРОГРАММУ
+----------------------------------
+Окно docxform можно открыть прямо из своего Qt-приложения, не запуская
+отдельный бинарник. Публичный интерфейс объявлен в docxform.h:
+
+  namespace docxform {
+      // Строит окно-форму для шаблона .docx и возвращает его как QWidget.
+      // Владелец виджета — вызывающий код (показать через show(), при желании
+      // задать родителя). При ошибке возвращает nullptr и кладёт текст ошибки
+      // в *error. QApplication к моменту вызова уже должен существовать.
+      QWidget* openTemplateForm(const QString& templatePath,
+                                QString* error = nullptr,
+                                QWidget* parent = nullptr);
+  }
+
+Пример использования:
+
+  #include "docxform.h"
+  ...
+  QString err;
+  if (QWidget* form = docxform::openTemplateForm("contract.docx", &err)) {
+      form->setAttribute(Qt::WA_DeleteOnClose);  // удалится при закрытии
+      form->show();
+  } else {
+      QMessageBox::critical(this, "Ошибка", err);
+  }
+
+Окно само спросит значения переменных, покажет выпадающие списки для таблиц
+\table{…} и по кнопке «Создать документ…» запишет готовый .docx (с диалогом
+сохранения). Дальше вмешательство хост-программы не требуется.
+
+Сборка вместе со своим приложением: компилируйте docxform.cpp с макросом
+DOCXFORM_NO_MAIN (он убирает встроенный main(), чтобы не конфликтовать с вашим)
+и слинкуйте с tablekinds.cpp:
+
+  g++ -O2 -std=c++17 -fPIC -DDOCXFORM_NO_MAIN \
+      моя_программа.cpp docxform.cpp tablekinds.cpp \
+      $(pkg-config --cflags --libs Qt5Widgets) -lz
+
+Без DOCXFORM_NO_MAIN docxform.cpp собирается как самостоятельная программа
+(встроенный main с GUI и режимами --render / --vars). Набор доступных видов
+таблиц настраивается, как обычно, в tablekinds.cpp.
+
+
 КОДЫ ВОЗВРАТА (режим --render)
 ------------------------------
   0  — успешно.
