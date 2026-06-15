@@ -803,8 +803,16 @@ public:
             form->addRow(ctx);  // full-width context line
             for (const std::string& name : g.vars) {
                 auto* edit = new QLineEdit(container);
-                edit->setPlaceholderText(QString::fromUtf8("значение для %1")
-                                             .arg(QString::fromStdString(name)));
+                edit->setPlaceholderText(
+                    QString::fromUtf8(
+                        "Введите значение для переменной %1. Этот текст "
+                        "заменит плейсхолдер {{%1}} во всех местах документа, "
+                        "где он встречается. Можно оставить поле пустым — "
+                        "тогда плейсхолдер будет удалён из итогового файла. "
+                        "Указанное значение подставляется как есть, поэтому "
+                        "проверьте регистр, пробелы и знаки препинания перед "
+                        "сохранением.")
+                        .arg(QString::fromStdString(name)));
                 form->addRow(QString::fromStdString(name), edit);
                 edits_.emplace_back(name, edit);
             }
