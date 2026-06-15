@@ -4,18 +4,23 @@
 // with two sections:
 //
 //   ========== VARS ==========
-//   var1=<text that was highlighted yellow>
-//   var2=...
+//   VAR1=<text that was highlighted yellow>
+//   VAR2=...
 //
 //   ========== TEXT ==========
 //   ... the document's paragraph text, where every yellow-highlighted span is
-//       replaced by a {{varN}} placeholder ...
+//       replaced by a \var{VARn} placeholder ...
 //
 // Rules for the TEXT section: contents of tables are ignored, paragraphs are
 // separated by a single blank line (LaTeX-style), and every output line is
 // word-wrapped to at most 75 characters.
 //
-// Build:  g++ -O2 -std=c++17 -o docx2txt docx2txt.cpp -lz
+// Alongside the .txt it also writes "<input-stem>_template.docx": a copy of the
+// input document in which every highlighted span is replaced, in place, by a
+// {{VARn}} placeholder that keeps the original yellow highlight.
+//
+// Build:  g++ -O2 -std=c++17 -o docx2txt docx2txt.cpp -lz -lstdc++fs
+//         (-lstdc++fs only needed on GCC 8 and older)
 // Usage:  ./docx2txt <input.docx> <output.txt>
 
 #include <cctype>
@@ -143,6 +148,135 @@ bool extractZipMember(const std::string& zip, const std::string& member,
         p += 46 + nameLen + extraLen + commentLen;
     }
     return false;
+}
+
+// Enumerate every member of a ZIP archive as (name, uncompressed bytes).
+// Used to copy an input .docx through while swapping a single part.
+bool listZipMembers(const std::string& zip,
+                    std::vector<std::pair<std::string, std::string>>& out) {
+    const uint32_t kEocdSig = 0x06054b50;
+    if (zip.size() < 22) return false;
+    size_t eocd = std::string::npos;
+    size_t lowest = zip.size() > 65557 ? zip.size() - 65557 : 0;
+    for (size_t i = zip.size() - 22 + 1; i-- > lowest;) {
+        if (rd32(zip, i) == kEocdSig) { eocd = i; break; }
+    }
+    if (eocd == std::string::npos) return false;
+
+    uint16_t entries = rd16(zip, eocd + 10);
+    uint32_t cdOffset = rd32(zip, eocd + 16);
+
+    const uint32_t kCenSig = 0x02014b50;
+    size_t p = cdOffset;
+    for (uint16_t i = 0; i < entries; ++i) {
+        if (p + 46 > zip.size() || rd32(zip, p) != kCenSig) return false;
+        uint16_t method = rd16(zip, p + 10);
+        uint32_t compSize = rd32(zip, p + 20);
+        uint16_t nameLen = rd16(zip, p + 28);
+        uint16_t extraLen = rd16(zip, p + 30);
+        uint16_t commentLen = rd16(zip, p + 32);
+        uint32_t localOffset = rd32(zip, p + 42);
+        std::string name = zip.substr(p + 46, nameLen);
+
+        const uint32_t kLocSig = 0x04034b50;
+        if (localOffset + 30 > zip.size() || rd32(zip, localOffset) != kLocSig)
+            return false;
+        uint16_t lNameLen = rd16(zip, localOffset + 26);
+        uint16_t lExtraLen = rd16(zip, localOffset + 28);
+        size_t dataStart = localOffset + 30 + lNameLen + lExtraLen;
+        if (dataStart + compSize > zip.size()) return false;
+
+        const char* data = zip.data() + dataStart;
+        std::string content;
+        if (method == 0) {
+            content.assign(data, compSize);
+        } else if (method == 8) {
+            if (!inflateRaw(data, compSize, content)) return false;
+        } else {
+            return false;  // unsupported compression method
+        }
+        out.emplace_back(std::move(name), std::move(content));
+        p += 46 + nameLen + extraLen + commentLen;
+    }
+    return true;
+}
+
+// ---- Minimal ZIP writer ---------------------------------------------------
+//
+// Members are written STORED (uncompressed) — valid and openable by Word, and
+// simple enough to need no deflate on the write side. (Same approach as the
+// txt2docx writer.)
+
+void put16(std::string& b, uint16_t v) {
+    b += static_cast<char>(v & 0xff);
+    b += static_cast<char>((v >> 8) & 0xff);
+}
+void put32(std::string& b, uint32_t v) {
+    b += static_cast<char>(v & 0xff);
+    b += static_cast<char>((v >> 8) & 0xff);
+    b += static_cast<char>((v >> 16) & 0xff);
+    b += static_cast<char>((v >> 24) & 0xff);
+}
+
+std::string buildZipStored(
+    const std::vector<std::pair<std::string, std::string>>& members) {
+    std::vector<uint32_t> crcs(members.size()), offsets(members.size());
+    std::string out;
+    for (size_t k = 0; k < members.size(); ++k) {
+        const std::string& name = members[k].first;
+        const std::string& data = members[k].second;
+        crcs[k] = static_cast<uint32_t>(
+            crc32(0, reinterpret_cast<const Bytef*>(data.data()),
+                  static_cast<uInt>(data.size())));
+        offsets[k] = static_cast<uint32_t>(out.size());
+        put32(out, 0x04034b50);  // local header signature
+        put16(out, 20);          // version needed
+        put16(out, 0);           // flags
+        put16(out, 0);           // method: stored
+        put16(out, 0);           // mod time
+        put16(out, 0);           // mod date
+        put32(out, crcs[k]);
+        put32(out, static_cast<uint32_t>(data.size()));  // compressed size
+        put32(out, static_cast<uint32_t>(data.size()));  // uncompressed size
+        put16(out, static_cast<uint16_t>(name.size()));
+        put16(out, 0);  // extra length
+        out += name;
+        out += data;
+    }
+    uint32_t cdStart = static_cast<uint32_t>(out.size());
+    for (size_t k = 0; k < members.size(); ++k) {
+        const std::string& name = members[k].first;
+        const std::string& data = members[k].second;
+        put32(out, 0x02014b50);  // central directory signature
+        put16(out, 20);          // version made by
+        put16(out, 20);          // version needed
+        put16(out, 0);           // flags
+        put16(out, 0);           // method
+        put16(out, 0);           // mod time
+        put16(out, 0);           // mod date
+        put32(out, crcs[k]);
+        put32(out, static_cast<uint32_t>(data.size()));
+        put32(out, static_cast<uint32_t>(data.size()));
+        put16(out, static_cast<uint16_t>(name.size()));
+        put16(out, 0);  // extra length
+        put16(out, 0);  // comment length
+        put16(out, 0);  // disk number start
+        put16(out, 0);  // internal attributes
+        put32(out, 0);  // external attributes
+        put32(out, offsets[k]);
+        out += name;
+    }
+    uint32_t cdEnd = static_cast<uint32_t>(out.size());
+
+    put32(out, 0x06054b50);  // end of central directory
+    put16(out, 0);           // this disk
+    put16(out, 0);           // disk with central directory
+    put16(out, static_cast<uint16_t>(members.size()));
+    put16(out, static_cast<uint16_t>(members.size()));
+    put32(out, cdEnd - cdStart);  // central directory size
+    put32(out, cdStart);          // central directory offset
+    put16(out, 0);                // comment length
+    return out;
 }
 
 // ---- XML helpers ----------------------------------------------------------
@@ -456,6 +590,140 @@ std::vector<Paragraph> parseBody(const std::string& xml) {
     return paras;
 }
 
+// ---- Template .docx generation --------------------------------------------
+//
+// Build a "template" copy of the document where every yellow-highlighted span
+// becomes a {{VARn}} placeholder, keeping the run's formatting so the
+// placeholder itself stays yellow. The numbering and grouping below MUST mirror
+// parseParagraph / parseBody and the VARS-assignment loop in main(), so that
+// {{VARn}} in the template lines up with VARn in the .txt.
+
+// Replace a run's visible text with `replacement`: the first <w:t> receives it,
+// any further <w:t> in the same run are emptied. The run properties (and thus
+// the highlight) are preserved untouched. `replacement` must be XML-safe (our
+// placeholders contain no special characters).
+std::string rewriteRunText(const std::string& run,
+                           const std::string& replacement) {
+    std::string out;
+    size_t i = 0, copyFrom = 0;
+    bool first = true;
+    while ((i = run.find('<', i)) != std::string::npos) {
+        if (tagIs(run, i, "t") && run[i + 1] != '/') {
+            size_t open = run.find('>', i);
+            if (open == std::string::npos) break;
+            if (run[open - 1] == '/') { i = open + 1; continue; }  // <w:t/>
+            size_t close = findClose(run, open, "t");
+            if (close == std::string::npos) break;
+            out += run.substr(copyFrom, open + 1 - copyFrom);  // ...<w:t ...>
+            if (first) { out += replacement; first = false; }   // else: emptied
+            copyFrom = close;  // resume at </w:t>
+            i = close;
+            continue;
+        }
+        size_t e = run.find('>', i);
+        if (e == std::string::npos) break;
+        i = e + 1;
+    }
+    out += run.substr(copyFrom);
+    return out;
+}
+
+// Kind of the most recently seen paragraph segment, used to reproduce
+// parseParagraph's run-merging (adjacent highlighted runs form one variable).
+enum class SegKind { None, Image, PlainText, HlText };
+
+// Transform one paragraph's inner XML, advancing the shared variable counter.
+std::string transformParagraphXml(const std::string& inner, int& counter) {
+    std::string out;
+    SegKind last = SegKind::None;
+    size_t i = 0, copyFrom = 0;
+    while ((i = inner.find('<', i)) != std::string::npos) {
+        if (tagIs(inner, i, "r") && inner[i + 1] != '/') {
+            size_t open = inner.find('>', i);
+            if (open == std::string::npos) break;
+            if (inner[open - 1] == '/') { i = open + 1; continue; }  // <w:r/>
+            size_t close = findClose(inner, open, "r");
+            if (close == std::string::npos) break;
+            size_t closeGt = inner.find('>', close);
+            if (closeGt == std::string::npos) break;
+            size_t runEnd = closeGt + 1;
+
+            out += inner.substr(copyFrom, i - copyFrom);  // gap before the run
+            std::string fullRun = inner.substr(i, runEnd - i);
+            std::string run = inner.substr(open + 1, close - open - 1);
+
+            std::string imgRid = runImageRid(run);
+            std::string text = runText(run);
+            if (!imgRid.empty()) last = SegKind::Image;
+            if (!text.empty()) {
+                if (runIsYellow(run)) {
+                    std::string placeholder =
+                        (last == SegKind::HlText)
+                            ? std::string()  // continuation of one variable
+                            : "{{VAR" + std::to_string(++counter) + "}}";
+                    out += rewriteRunText(fullRun, placeholder);
+                    last = SegKind::HlText;
+                } else {
+                    out += fullRun;  // plain text, unchanged
+                    last = SegKind::PlainText;
+                }
+            } else {
+                out += fullRun;  // image-only or empty run, unchanged
+            }
+            copyFrom = runEnd;
+            i = runEnd;
+            continue;
+        }
+        size_t e = inner.find('>', i);
+        if (e == std::string::npos) break;
+        i = e + 1;
+    }
+    out += inner.substr(copyFrom);
+    return out;
+}
+
+// Rewrite a whole word/document.xml into its template form. Tables are left
+// untouched (their text is not extracted as variables, mirroring parseBody).
+std::string buildTemplateXml(const std::string& xml) {
+    std::string out;
+    int tableDepth = 0, counter = 0;
+    size_t i = 0, copyFrom = 0;
+    while (i < xml.size()) {
+        if (xml[i] != '<') { ++i; continue; }
+        bool closing = (i + 1 < xml.size() && xml[i + 1] == '/');
+
+        if (tagIs(xml, i, "tbl")) {
+            size_t e = xml.find('>', i);
+            if (e == std::string::npos) break;
+            bool selfClose = (xml[e - 1] == '/');
+            if (closing) { if (tableDepth > 0) --tableDepth; }
+            else if (!selfClose) ++tableDepth;
+            i = e + 1;
+            continue;
+        }
+
+        if (tableDepth == 0 && tagIs(xml, i, "p") && !closing) {
+            size_t e = xml.find('>', i);
+            if (e == std::string::npos) break;
+            if (xml[e - 1] == '/') { i = e + 1; continue; }  // empty <w:p/>
+            size_t close = findClose(xml, e + 1, "p");
+            if (close == std::string::npos) break;
+            out += xml.substr(copyFrom, e + 1 - copyFrom);  // up to <w:p ...>
+            out += transformParagraphXml(xml.substr(e + 1, close - e - 1),
+                                         counter);
+            copyFrom = close;  // resume at </w:p>
+            i = close;
+            continue;
+        }
+
+        size_t e = xml.find('>', i);
+        if (e == std::string::npos) break;
+        i = e + 1;
+    }
+    out += xml.substr(copyFrom);
+    return out;
+}
+
 // ---- Word wrapping --------------------------------------------------------
 
 size_t utf8Length(const std::string& s) {
@@ -644,10 +912,10 @@ int main(int argc, char** argv) {
     for (const auto& im : images) out << im.first << "=" << im.second << "\n";
     out << "\n";
 
-    // VARS section: VARn={{highlighted text}}.
+    // VARS section: VARn=highlighted text (raw, without any wrapper).
     out << "========== VARS ==========\n";
     for (const auto& v : vars)
-        out << v.first << "={{" << v.second << "}}\n";
+        out << v.first << "=" << v.second << "\n";
     out << "\n";
 
     // SETTINGS section: font sizes (points) for the rebuilt .docx. These are
@@ -670,6 +938,28 @@ int main(int argc, char** argv) {
         }
         for (const std::string& line : lines) out << line << '\n';
         out << '\n';
+    }
+
+    // Also emit "<input-stem>_template.docx" next to the .txt: a copy of the
+    // input document with every highlighted span replaced by a {{VARn}}
+    // placeholder that keeps the original yellow highlight.
+    std::vector<std::pair<std::string, std::string>> members;
+    if (listZipMembers(zip, members)) {
+        for (auto& m : members)
+            if (m.first == "word/document.xml")
+                m.second = buildTemplateXml(xml);
+        std::string inStem = fs::path(argv[1]).stem().string();
+        fs::path templatePath =
+            outPath.parent_path() / (inStem + "_template.docx");
+        std::string tzip = buildZipStored(members);
+        std::ofstream tf(templatePath.string(), std::ios::binary);
+        if (tf)
+            tf.write(tzip.data(), static_cast<std::streamsize>(tzip.size()));
+        else
+            std::cerr << "Warning: cannot write template '"
+                      << templatePath.string() << "'\n";
+    } else {
+        std::cerr << "Warning: could not build template .docx from input\n";
     }
 
     return 0;

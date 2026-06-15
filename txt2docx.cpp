@@ -8,10 +8,13 @@
 //   ========== TEXT ==========
 //   ... paragraphs with {{VAR1}}, {{VAR2}} placeholders ...
 //
-// substitutes a value for every {{VARn}} placeholder, and emits a finished
+// substitutes a value for every \var{VARn} placeholder, and emits a finished
 // .docx. Values come from an optional values file (VARn=value, one per line);
 // any variable not given a value falls back to the default in the template's
 // VARS section, so an empty values file reproduces the original text.
+//
+// Each substituted value is highlighted yellow in the output, so the filled-in
+// spots stand out (mirroring the yellow highlighting docx2txt extracts from).
 //
 // The 75-char wrapping in the template is undone (lines of a paragraph are
 // rejoined with spaces) so Word re-wraps the text itself.
@@ -134,34 +137,6 @@ std::vector<std::string> parseParagraphs(const std::vector<std::string>& lines,
     return paras;
 }
 
-// ---- Placeholder substitution ---------------------------------------------
-
-std::string substitute(const std::string& text,
-                       const std::map<std::string, std::string>& values,
-                       std::vector<std::string>& missing) {
-    std::string out;
-    size_t i = 0;
-    while (i < text.size()) {
-        if (text.compare(i, 5, "\\var{") == 0) {
-            size_t close = text.find('}', i + 5);
-            if (close != std::string::npos) {
-                std::string name = trim(text.substr(i + 5, close - i - 5));
-                auto it = values.find(name);
-                if (it != values.end()) {
-                    out += it->second;
-                } else {
-                    missing.push_back(name);
-                    out += "\\var{" + name + "}";  // leave visible
-                }
-                i = close + 1;
-                continue;
-            }
-        }
-        out += text[i++];
-    }
-    return out;
-}
-
 // ---- Minimal .docx (ZIP) writer -------------------------------------------
 
 void put16(std::string& b, uint16_t v) {
@@ -254,11 +229,69 @@ std::string xmlEscape(const std::string& s) {
     return out;
 }
 
-// One output paragraph: its text and whether it is a chapter heading.
+// One piece of an output paragraph: literal text, a substituted variable value
+// (rendered yellow), or an embedded image (by name).
+struct Piece {
+    enum Kind { Text, Value, Image } kind;
+    std::string s;
+};
+
+// One output paragraph: its pieces and whether it is a chapter heading.
 struct Block {
-    std::string text;
+    std::vector<Piece> pieces;
     bool heading = false;
 };
+
+// ---- Placeholder substitution ---------------------------------------------
+
+// Expand a template paragraph into pieces: \var{NAME} becomes a Value piece
+// holding the substituted value (so it can be highlighted), \img{NAME} becomes
+// an Image piece, and everything else is literal Text. Unknown variables are
+// recorded in `missing` and left visible as literal "\var{NAME}".
+std::vector<Piece> buildPieces(const std::string& text,
+                               const std::map<std::string, std::string>& values,
+                               std::vector<std::string>& missing) {
+    std::vector<Piece> out;
+    std::string plain;
+    auto flush = [&]() {
+        if (!plain.empty()) {
+            out.push_back({Piece::Text, plain});
+            plain.clear();
+        }
+    };
+    size_t i = 0;
+    while (i < text.size()) {
+        if (text.compare(i, 5, "\\var{") == 0) {
+            size_t close = text.find('}', i + 5);
+            if (close != std::string::npos) {
+                std::string name = trim(text.substr(i + 5, close - i - 5));
+                auto it = values.find(name);
+                if (it != values.end()) {
+                    flush();
+                    out.push_back({Piece::Value, it->second});
+                } else {
+                    missing.push_back(name);
+                    plain += "\\var{" + name + "}";  // leave visible
+                }
+                i = close + 1;
+                continue;
+            }
+        }
+        if (text.compare(i, 5, "\\img{") == 0) {
+            size_t close = text.find('}', i + 5);
+            if (close != std::string::npos) {
+                flush();
+                out.push_back({Piece::Image,
+                               text.substr(i + 5, close - i - 5)});
+                i = close + 1;
+                continue;
+            }
+        }
+        plain += text[i++];
+    }
+    flush();
+    return out;
+}
 
 // An embedded image: its relationship id and display size in EMU.
 struct ImgInfo {
@@ -343,12 +376,16 @@ std::string buildDocumentXml(const std::vector<Block>& paragraphs,
         // Font size is stored in half-points in OOXML, hence *2.
         int half = (p.heading ? headerPt : defaultPt) * 2;
         std::string sz = std::to_string(half);
-        std::string rpr =
-            "<w:rPr><w:rFonts w:ascii=\"Times New Roman\" "
+        std::string rprInner =
+            "<w:rFonts w:ascii=\"Times New Roman\" "
             "w:hAnsi=\"Times New Roman\" w:cs=\"Times New Roman\"/>";
-        if (p.heading) rpr += "<w:b/><w:bCs/>";  // chapters are bold
-        rpr += "<w:sz w:val=\"" + sz + "\"/><w:szCs w:val=\"" + sz + "\"/>";
-        rpr += "</w:rPr>";
+        if (p.heading) rprInner += "<w:b/><w:bCs/>";  // chapters are bold
+        rprInner +=
+            "<w:sz w:val=\"" + sz + "\"/><w:szCs w:val=\"" + sz + "\"/>";
+        std::string rpr = "<w:rPr>" + rprInner + "</w:rPr>";
+        // Same properties plus a yellow highlight, used for substituted values.
+        std::string rprHl =
+            "<w:rPr>" + rprInner + "<w:highlight w:val=\"yellow\"/></w:rPr>";
 
         // No spacing between ordinary paragraphs; one line above and below
         // chapter headings. (Word/LibreOffice take after(prev)+before(next),
@@ -363,28 +400,23 @@ std::string buildDocumentXml(const std::vector<Block>& paragraphs,
         // Ordinary paragraphs start with one tab; chapter headings do not.
         if (!p.heading) body += "<w:r>" + rpr + "<w:tab/></w:r>";
 
-        // Split the paragraph on \img{NAME} tokens: text -> text run,
-        // image -> drawing run.
-        auto emitText = [&](const std::string& s) {
+        auto emitText = [&](const std::string& props, const std::string& s) {
             if (!s.empty())
-                body += "<w:r>" + rpr + "<w:t xml:space=\"preserve\">" +
+                body += "<w:r>" + props + "<w:t xml:space=\"preserve\">" +
                         xmlEscape(s) + "</w:t></w:r>";
         };
-        const std::string& c = p.text;
-        size_t i = 0;
-        while (i < c.size()) {
-            size_t pos = c.find("\\img{", i);
-            if (pos == std::string::npos) { emitText(c.substr(i)); break; }
-            emitText(c.substr(i, pos - i));
-            size_t close = c.find('}', pos + 5);
-            if (close == std::string::npos) { emitText(c.substr(pos)); break; }
-            std::string name = c.substr(pos + 5, close - pos - 5);
-            auto it = imgs.find(name);
-            if (it != imgs.end())
-                body += "<w:r>" + drawingXml(it->second, ++docId) + "</w:r>";
-            else
-                emitText("\\img{" + name + "}");  // unknown -> leave visible
-            i = close + 1;
+        for (const Piece& pc : p.pieces) {
+            if (pc.kind == Piece::Text) {
+                emitText(rpr, pc.s);  // plain template text
+            } else if (pc.kind == Piece::Value) {
+                emitText(rprHl, pc.s);  // substituted value -> yellow
+            } else {  // Piece::Image
+                auto it = imgs.find(pc.s);
+                if (it != imgs.end())
+                    body += "<w:r>" + drawingXml(it->second, ++docId) + "</w:r>";
+                else
+                    emitText(rpr, "\\img{" + pc.s + "}");  // unknown: keep visible
+            }
         }
         body += "</w:p>";
     }
@@ -476,7 +508,7 @@ int main(int argc, char** argv) {
         bool heading = raw.size() >= 5 && raw.compare(0, 4, "\\ch{") == 0 &&
                        raw.back() == '}';
         std::string content = heading ? raw.substr(4, raw.size() - 5) : raw;
-        paragraphs.push_back({substitute(content, values, missing), heading});
+        paragraphs.push_back({buildPieces(content, values, missing), heading});
     }
     if (!missing.empty()) {
         std::cerr << "Warning: no value for:";
@@ -497,11 +529,11 @@ int main(int argc, char** argv) {
     for (const auto& kv : imgPaths) {
         const std::string& name = kv.first;
         bool used = false;  // only embed images actually referenced in TEXT
-        for (const Block& b : paragraphs)
-            if (b.text.find("\\img{" + name + "}") != std::string::npos) {
-                used = true;
-                break;
-            }
+        for (const Block& b : paragraphs) {
+            for (const Piece& pc : b.pieces)
+                if (pc.kind == Piece::Image && pc.s == name) { used = true; break; }
+            if (used) break;
+        }
         if (!used) continue;
 
         fs::path ip(kv.second);
