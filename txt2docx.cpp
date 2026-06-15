@@ -23,10 +23,13 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <zlib.h>  // crc32
@@ -82,6 +85,7 @@ std::vector<std::string> splitLines(const std::string& s) {
 
 // ---- Template parsing -----------------------------------------------------
 
+const char* kImagesHeader = "========== IMAGES ==========";
 const char* kVarsHeader = "========== VARS ==========";
 const char* kSettingsHeader = "========== SETTINGS ==========";
 const char* kTextHeader = "========== TEXT ==========";
@@ -256,16 +260,84 @@ struct Block {
     bool heading = false;
 };
 
+// An embedded image: its relationship id and display size in EMU.
+struct ImgInfo {
+    std::string rId;
+    long cx = 0, cy = 0;
+};
+
+// Pixel size of a PNG or JPEG from its header (0,0 if unknown).
+std::pair<long, long> imagePxSize(const std::string& b) {
+    auto u = [&](size_t o) { return (unsigned char)b[o]; };
+    auto be16 = [&](size_t o) { return (long)(u(o) << 8 | u(o + 1)); };
+    auto be32 = [&](size_t o) {
+        return (long)((u(o) << 24) | (u(o + 1) << 16) | (u(o + 2) << 8) |
+                      u(o + 3));
+    };
+    if (b.size() >= 24 && u(0) == 0x89 && b[1] == 'P')  // PNG: IHDR w,h
+        return {be32(16), be32(20)};
+    if (b.size() >= 4 && u(0) == 0xFF && u(1) == 0xD8) {  // JPEG: scan SOF
+        size_t i = 2;
+        while (i + 9 < b.size()) {
+            if (u(i) != 0xFF) { ++i; continue; }
+            unsigned char m = u(i + 1);
+            if (m == 0xD8 || m == 0xD9) { i += 2; continue; }
+            long len = be16(i + 2);
+            if ((m >= 0xC0 && m <= 0xC3) || (m >= 0xC5 && m <= 0xC7) ||
+                (m >= 0xC9 && m <= 0xCB) || (m >= 0xCD && m <= 0xCF))
+                return {be16(i + 7), be16(i + 5)};  // width, height
+            i += 2 + len;
+        }
+    }
+    return {0, 0};
+}
+
+std::string mimeForExt(const std::string& ext) {
+    if (ext == "png") return "image/png";
+    if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
+    if (ext == "gif") return "image/gif";
+    if (ext == "bmp") return "image/bmp";
+    if (ext == "tif" || ext == "tiff") return "image/tiff";
+    if (ext == "emf") return "image/x-emf";
+    if (ext == "wmf") return "image/x-wmf";
+    return "application/octet-stream";
+}
+
+// An inline <w:drawing> referencing image rId, sized cx x cy EMU.
+std::string drawingXml(const ImgInfo& im, int id) {
+    std::string cx = std::to_string(im.cx), cy = std::to_string(im.cy),
+                sid = std::to_string(id);
+    return "<w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" "
+           "distR=\"0\"><wp:extent cx=\"" + cx + "\" cy=\"" + cy + "\"/>"
+           "<wp:docPr id=\"" + sid + "\" name=\"img" + sid + "\"/>"
+           "<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/"
+           "drawingml/2006/picture\"><pic:pic><pic:nvPicPr><pic:cNvPr id=\"" +
+           sid + "\" name=\"img" + sid + "\"/><pic:cNvPicPr/></pic:nvPicPr>"
+           "<pic:blipFill><a:blip r:embed=\"" + im.rId + "\"/><a:stretch>"
+           "<a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm>"
+           "<a:off x=\"0\" y=\"0\"/><a:ext cx=\"" + cx + "\" cy=\"" + cy +
+           "\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>"
+           "</pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline>"
+           "</w:drawing>";
+}
+
 std::string buildDocumentXml(const std::vector<Block>& paragraphs,
-                             int defaultPt, int headerPt) {
+                             int defaultPt, int headerPt,
+                             const std::map<std::string, ImgInfo>& imgs) {
     std::string body;
     body +=
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
         "<w:document xmlns:w=\"http://schemas.openxmlformats.org/"
-        "wordprocessingml/2006/main\"><w:body>";
+        "wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats."
+        "org/officeDocument/2006/relationships\" xmlns:wp=\"http://schemas."
+        "openxmlformats.org/drawingml/2006/wordprocessingDrawing\" xmlns:a="
+        "\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:pic="
+        "\"http://schemas.openxmlformats.org/drawingml/2006/picture\">"
+        "<w:body>";
     // One blank line, in twips (1/20 pt), measured in the body font. Used as
     // the space above and below chapter headings.
     std::string gap = std::to_string(defaultPt * 20);
+    int docId = 0;  // unique drawing ids
 
     for (const Block& p : paragraphs) {
         // Font size is stored in half-points in OOXML, hence *2.
@@ -287,11 +359,34 @@ std::string buildDocumentXml(const std::vector<Block>& paragraphs,
                       : "<w:spacing w:before=\"0\" w:after=\"0\" "
                         "w:line=\"240\" w:lineRule=\"auto\"/>";
 
+        body += "<w:p><w:pPr>" + spacing + rpr + "</w:pPr>";
         // Ordinary paragraphs start with one tab; chapter headings do not.
-        std::string tab = p.heading ? "" : "<w:tab/>";
-        body += "<w:p><w:pPr>" + spacing + rpr + "</w:pPr><w:r>" + rpr + tab +
-                "<w:t xml:space=\"preserve\">" + xmlEscape(p.text) +
-                "</w:t></w:r></w:p>";
+        if (!p.heading) body += "<w:r>" + rpr + "<w:tab/></w:r>";
+
+        // Split the paragraph on \img{NAME} tokens: text -> text run,
+        // image -> drawing run.
+        auto emitText = [&](const std::string& s) {
+            if (!s.empty())
+                body += "<w:r>" + rpr + "<w:t xml:space=\"preserve\">" +
+                        xmlEscape(s) + "</w:t></w:r>";
+        };
+        const std::string& c = p.text;
+        size_t i = 0;
+        while (i < c.size()) {
+            size_t pos = c.find("\\img{", i);
+            if (pos == std::string::npos) { emitText(c.substr(i)); break; }
+            emitText(c.substr(i, pos - i));
+            size_t close = c.find('}', pos + 5);
+            if (close == std::string::npos) { emitText(c.substr(pos)); break; }
+            std::string name = c.substr(pos + 5, close - pos - 5);
+            auto it = imgs.find(name);
+            if (it != imgs.end())
+                body += "<w:r>" + drawingXml(it->second, ++docId) + "</w:r>";
+            else
+                emitText("\\img{" + name + "}");  // unknown -> leave visible
+            i = close + 1;
+        }
+        body += "</w:p>";
     }
     body += "</w:body></w:document>";
     return body;
@@ -322,10 +417,11 @@ int main(int argc, char** argv) {
     std::vector<std::string> lines = splitLines(tmpl);
 
     // Locate the section headers.
-    size_t varsAt = lines.size(), settingsAt = lines.size(),
-           textAt = lines.size();
+    size_t imagesAt = lines.size(), varsAt = lines.size(),
+           settingsAt = lines.size(), textAt = lines.size();
     for (size_t i = 0; i < lines.size(); ++i) {
-        if (trim(lines[i]) == kVarsHeader) varsAt = i;
+        if (trim(lines[i]) == kImagesHeader) imagesAt = i;
+        else if (trim(lines[i]) == kVarsHeader) varsAt = i;
         else if (trim(lines[i]) == kSettingsHeader) settingsAt = i;
         else if (trim(lines[i]) == kTextHeader) textAt = i;
     }
@@ -340,6 +436,13 @@ int main(int argc, char** argv) {
     size_t varsEnd = std::min(settingsAt, textAt);
     if (varsAt < varsEnd) parseAssignments(lines, varsAt + 1, varsEnd, values);
 
+    // Image paths from the template IMAGES section (bounded before VARS).
+    std::map<std::string, std::string> imgPaths;
+    if (imagesAt < lines.size()) {
+        size_t imgEnd = std::min({varsAt, settingsAt, textAt});
+        parseAssignments(lines, imagesAt + 1, imgEnd, imgPaths);
+    }
+
     // Font sizes from the template SETTINGS section.
     std::map<std::string, std::string> settings;
     if (settingsAt < textAt)
@@ -352,9 +455,10 @@ int main(int argc, char** argv) {
             return 1;
         }
         std::vector<std::string> vlines = splitLines(vfile);
-        // Values file may override both variables and font settings.
+        // Values file may override variables, font settings and image paths.
         parseAssignments(vlines, 0, vlines.size(), values);
         parseAssignments(vlines, 0, vlines.size(), settings);
+        parseAssignments(vlines, 0, vlines.size(), imgPaths);
     }
 
     int defaultPt = 13, headerPt = 16;
@@ -376,23 +480,78 @@ int main(int argc, char** argv) {
     }
     if (!missing.empty()) {
         std::cerr << "Warning: no value for:";
-        for (const std::string& m : missing) std::cerr << " {{" << m << "}}";
+        for (const std::string& m : missing) std::cerr << " \\var{" << m << "}";
         std::cerr << " (left as-is)\n";
     }
 
+    namespace fs = std::filesystem;
+    fs::path tmplDir = fs::path(templatePath).parent_path();
+
+    // Embed each referenced image: read the file, size it, add a media part
+    // and a document relationship. EMU = px * 9525 (96 dpi); cap width at 6in.
+    std::map<std::string, ImgInfo> imgInfo;
+    std::vector<ZipEntry> media;
+    std::string docRels;
+    std::set<std::string> exts;
+    int rid = 0;
+    for (const auto& kv : imgPaths) {
+        const std::string& name = kv.first;
+        bool used = false;  // only embed images actually referenced in TEXT
+        for (const Block& b : paragraphs)
+            if (b.text.find("\\img{" + name + "}") != std::string::npos) {
+                used = true;
+                break;
+            }
+        if (!used) continue;
+
+        fs::path ip(kv.second);
+        if (ip.is_relative()) ip = tmplDir / ip;
+        std::string bytes;
+        if (!readWholeFile(ip.string(), bytes)) {
+            std::cerr << "Warning: cannot read image '" << kv.second
+                      << "' for " << name << " (skipped)\n";
+            continue;
+        }
+        auto [w, h] = imagePxSize(bytes);
+        if (w <= 0) w = 400;
+        if (h <= 0) h = 300;
+        long cx = w * 9525, cy = h * 9525;
+        const long maxCx = 5486400;  // 6 inches
+        if (cx > maxCx) { cy = cy * maxCx / cx; cx = maxCx; }
+
+        std::string ext = ip.extension().string();
+        if (!ext.empty() && ext[0] == '.') ext.erase(0, 1);
+        for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+        exts.insert(ext);
+
+        ++rid;
+        std::string rId = "rId" + std::to_string(rid);
+        std::string target = "media/image" + std::to_string(rid) + "." + ext;
+        media.push_back({"word/" + target, bytes, 0, 0});
+        docRels += "<Relationship Id=\"" + rId +
+                   "\" Type=\"http://schemas.openxmlformats.org/officeDocument/"
+                   "2006/relationships/image\" Target=\"" + target + "\"/>";
+        imgInfo[name] = {rId, cx, cy};
+    }
+
+    // Content types: base + a Default for each image extension used.
+    std::string ctypes =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+        "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/"
+        "content-types\">"
+        "<Default Extension=\"rels\" ContentType=\"application/"
+        "vnd.openxmlformats-package.relationships+xml\"/>"
+        "<Default Extension=\"xml\" ContentType=\"application/xml\"/>";
+    for (const std::string& e : exts)
+        ctypes += "<Default Extension=\"" + e + "\" ContentType=\"" +
+                  mimeForExt(e) + "\"/>";
+    ctypes +=
+        "<Override PartName=\"/word/document.xml\" ContentType=\"application/"
+        "vnd.openxmlformats-officedocument.wordprocessingml.document.main"
+        "+xml\"/></Types>";
+
     std::vector<ZipEntry> entries;
-    entries.push_back(
-        {"[Content_Types].xml",
-         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
-         "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/"
-         "content-types\">"
-         "<Default Extension=\"rels\" ContentType=\"application/"
-         "vnd.openxmlformats-package.relationships+xml\"/>"
-         "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
-         "<Override PartName=\"/word/document.xml\" ContentType=\"application/"
-         "vnd.openxmlformats-officedocument.wordprocessingml.document.main"
-         "+xml\"/></Types>",
-         0, 0});
+    entries.push_back({"[Content_Types].xml", ctypes, 0, 0});
     entries.push_back(
         {"_rels/.rels",
          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
@@ -401,8 +560,17 @@ int main(int argc, char** argv) {
          "schemas.openxmlformats.org/officeDocument/2006/relationships/"
          "officeDocument\" Target=\"word/document.xml\"/></Relationships>",
          0, 0});
-    entries.push_back({"word/document.xml",
-                       buildDocumentXml(paragraphs, defaultPt, headerPt), 0, 0});
+    entries.push_back(
+        {"word/document.xml",
+         buildDocumentXml(paragraphs, defaultPt, headerPt, imgInfo), 0, 0});
+    // word/_rels/document.xml.rels (image relationships).
+    entries.push_back(
+        {"word/_rels/document.xml.rels",
+         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+         "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/"
+         "2006/relationships\">" + docRels + "</Relationships>",
+         0, 0});
+    for (auto& m : media) entries.push_back(std::move(m));
 
     std::string zip = buildZip(std::move(entries));
 
