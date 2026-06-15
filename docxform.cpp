@@ -15,8 +15,13 @@
 // matched span is rebuilt. Images, tables, tabs and other formatting are
 // preserved; placeholders inside tables are templated too.
 //
+// Tables: a \table{name} placeholder is replaced by a generated <w:tbl>. The
+// available table kinds (columns, rows, content) live in tablekinds.cpp - that
+// is where you add new ones. The GUI shows a drop-down per \table{name} to pick
+// which kind to insert.
+//
 // Build:  make docxform
-//   or:   g++ -O2 -std=c++17 -fPIC docxform.cpp -o docxform \
+//   or:   g++ -O2 -std=c++17 -fPIC docxform.cpp tablekinds.cpp -o docxform \
 //             $(pkg-config --cflags --libs Qt5Widgets) -lz
 // Usage:  ./docxform [template.docx]   (without an argument it asks for a file)
 
@@ -35,6 +40,7 @@
 #include <zlib.h>
 
 #include <QApplication>
+#include <QComboBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -45,6 +51,8 @@
 #include <QScrollArea>
 #include <QVBoxLayout>
 #include <QWidget>
+
+#include "tablekinds.h"
 
 namespace {
 
@@ -433,6 +441,30 @@ bool nextPlaceholder(const std::string& s, size_t from, size_t& begin,
     return false;
 }
 
+// Find the next \table{name} at or after `from`. name is everything up to the
+// closing '}', trimmed. On success sets begin/end (range of the whole token).
+bool nextTablePlaceholder(const std::string& s, size_t from, size_t& begin,
+                          size_t& end, std::string& name) {
+    size_t p = from;
+    while ((p = s.find("\\table{", p)) != std::string::npos) {
+        size_t close = s.find('}', p + 7);
+        if (close == std::string::npos) return false;
+        std::string raw = s.substr(p + 7, close - (p + 7));
+        size_t a = 0, b = raw.size();
+        while (a < b && std::isspace(static_cast<unsigned char>(raw[a]))) ++a;
+        while (b > a && std::isspace(static_cast<unsigned char>(raw[b - 1]))) --b;
+        std::string nm = raw.substr(a, b - a);
+        if (!nm.empty()) {
+            begin = p;
+            end = close + 1;
+            name = nm;
+            return true;
+        }
+        p = close + 1;  // empty name; keep scanning
+    }
+    return false;
+}
+
 // Concatenated text of a paragraph's simple runs (in document order).
 std::string concatParagraphText(const std::string& inner) {
     std::string P;
@@ -576,21 +608,99 @@ std::string transformParagraph(const std::string& inner,
     return out;
 }
 
-// Apply transformParagraph to every <w:p> in document.xml (tables included).
+// Walk document.xml and, for every <w:p>:
+//   - if (at body level) it holds a \table{name} placeholder whose table the
+//     user selected, replace the WHOLE paragraph with the generated <w:tbl>;
+//   - otherwise substitute its {{variables}} as usual.
+// `tables` maps a placeholder name to the table content chosen for it.
 std::string transformDocument(const std::string& xml,
-                              const std::map<std::string, std::string>& values) {
+                              const std::map<std::string, std::string>& values,
+                              const std::map<std::string, docxform::TableData>& tables) {
     std::string out;
     size_t i = 0, copyFrom = 0;
+    int tableDepth = 0;
     while ((i = xml.find('<', i)) != std::string::npos) {
-        if (i + 1 < xml.size() && xml[i + 1] != '/' && tagIs(xml, i, "p")) {
+        bool closing = (i + 1 < xml.size() && xml[i + 1] == '/');
+
+        if (tagIs(xml, i, "tbl")) {  // track nesting so we only insert at body level
+            size_t e = xml.find('>', i);
+            if (e == std::string::npos) break;
+            bool selfClose = (xml[e - 1] == '/');
+            if (closing) { if (tableDepth > 0) --tableDepth; }
+            else if (!selfClose) ++tableDepth;
+            i = e + 1;
+            continue;
+        }
+
+        if (!closing && tagIs(xml, i, "p")) {
             size_t e = xml.find('>', i);
             if (e == std::string::npos) break;
             if (xml[e - 1] == '/') { i = e + 1; continue; }  // empty <w:p/>
             size_t close = findClose(xml, e + 1, "p");
             if (close == std::string::npos) break;
+            std::string inner = xml.substr(e + 1, close - e - 1);
+
+            // Does this paragraph contain a selected \table{...}? (body only)
+            std::string tablesXml;
+            if (tableDepth == 0 && !tables.empty()) {
+                std::string P = concatParagraphText(inner);
+                size_t pos = 0, b, en;
+                std::string name;
+                while (nextTablePlaceholder(P, pos, b, en, name)) {
+                    auto it = tables.find(name);
+                    if (it != tables.end()) {
+                        tablesXml += docxform::buildTableXml(it->second);
+                        tablesXml += "<w:p/>";  // keep a paragraph after a table
+                    }
+                    pos = en;
+                }
+            }
+
+            if (!tablesXml.empty()) {  // replace the whole <w:p>...</w:p>
+                size_t closeGt = xml.find('>', close);
+                if (closeGt == std::string::npos) break;
+                size_t pEnd = closeGt + 1;
+                out += xml.substr(copyFrom, i - copyFrom);  // up to <w:p ...>
+                out += tablesXml;
+                copyFrom = pEnd;
+                i = pEnd;
+                continue;
+            }
+
             out += xml.substr(copyFrom, e + 1 - copyFrom);  // up to <w:p ...>
-            out += transformParagraph(xml.substr(e + 1, close - e - 1), values);
+            out += transformParagraph(inner, values);
             copyFrom = close;
+            i = close;
+            continue;
+        }
+
+        size_t e = xml.find('>', i);
+        if (e == std::string::npos) break;
+        i = e + 1;
+    }
+    out += xml.substr(copyFrom);
+    return out;
+}
+
+// Collect \table{name} placeholder names across the document, first-seen order.
+std::vector<std::string> collectTables(const std::string& xml) {
+    std::vector<std::string> order;
+    std::set<std::string> seen;
+    size_t i = 0;
+    while ((i = xml.find('<', i)) != std::string::npos) {
+        if (i + 1 < xml.size() && xml[i + 1] != '/' && tagIs(xml, i, "p")) {
+            size_t e = xml.find('>', i);
+            if (e == std::string::npos) break;
+            if (xml[e - 1] == '/') { i = e + 1; continue; }
+            size_t close = findClose(xml, e + 1, "p");
+            if (close == std::string::npos) break;
+            std::string P = concatParagraphText(xml.substr(e + 1, close - e - 1));
+            size_t pos = 0, b, en;
+            std::string name;
+            while (nextTablePlaceholder(P, pos, b, en, name)) {
+                if (seen.insert(name).second) order.push_back(name);
+                pos = en;
+            }
             i = close;
             continue;
         }
@@ -598,8 +708,7 @@ std::string transformDocument(const std::string& xml,
         if (e == std::string::npos) break;
         i = e + 1;
     }
-    out += xml.substr(copyFrom);
-    return out;
+    return order;
 }
 
 // Collect placeholder names across the whole document, in first-seen order.
@@ -634,23 +743,29 @@ std::vector<std::string> collectVars(const std::string& xml) {
 // ---- GUI ------------------------------------------------------------------
 
 // A QWidget-only window (no Q_OBJECT, so no moc is needed): one input field per
-// placeholder, plus a button that writes the filled .docx.
+// {{variable}}, one drop-down per \table{...}, and a button that writes the
+// filled .docx. The widget is self-contained, so it can be embedded in another
+// Qt application as-is.
 class FormWindow : public QWidget {
 public:
     FormWindow(const QString& path, std::string zip, std::string xml,
-               std::vector<std::string> vars)
+               std::vector<std::string> vars, std::vector<std::string> tables)
         : path_(path),
           zip_(std::move(zip)),
           xml_(std::move(xml)),
-          vars_(std::move(vars)) {
+          vars_(std::move(vars)),
+          tables_(std::move(tables)),
+          kinds_(docxform::tableKinds()) {
         setWindowTitle(QString::fromUtf8("docxform — шаблонизатор .docx"));
-        resize(520, 480);
+        resize(560, 540);
 
         auto* root = new QVBoxLayout(this);
 
-        QString head = QString::fromUtf8("Шаблон: %1\nНайдено переменных: %2")
-                           .arg(QFileInfo(path_).fileName())
-                           .arg(static_cast<int>(vars_.size()));
+        QString head =
+            QString::fromUtf8("Шаблон: %1\nПеременных: %2,  таблиц: %3")
+                .arg(QFileInfo(path_).fileName())
+                .arg(static_cast<int>(vars_.size()))
+                .arg(static_cast<int>(tables_.size()));
         auto* header = new QLabel(head, this);
         header->setWordWrap(true);
         root->addWidget(header);
@@ -658,18 +773,39 @@ public:
         auto* container = new QWidget;
         auto* form = new QFormLayout(container);
         form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-        if (vars_.empty()) {
-            form->addRow(new QLabel(
-                QString::fromUtf8("В документе нет плейсхолдеров {{...}}."),
-                container));
+
+        if (!vars_.empty()) {
+            auto* lbl = new QLabel(QString::fromUtf8("— Переменные {{…}} —"),
+                                   container);
+            form->addRow(lbl);
         }
         for (const std::string& name : vars_) {
             auto* edit = new QLineEdit(container);
-            edit->setPlaceholderText(
-                QString::fromUtf8("значение для %1")
-                    .arg(QString::fromStdString(name)));
+            edit->setPlaceholderText(QString::fromUtf8("значение для %1")
+                                         .arg(QString::fromStdString(name)));
             form->addRow(QString::fromStdString(name), edit);
             edits_.emplace_back(name, edit);
+        }
+
+        if (!tables_.empty()) {
+            form->addRow(new QLabel(
+                QString::fromUtf8("— Таблицы \\table{…} —"), container));
+        }
+        for (const std::string& name : tables_) {
+            auto* combo = new QComboBox(container);
+            combo->addItem(QString::fromUtf8("— не вставлять —"));  // index 0
+            for (const docxform::TableKind& k : kinds_)
+                combo->addItem(QString::fromStdString(k.title));
+            if (!kinds_.empty()) combo->setCurrentIndex(1);  // first real kind
+            form->addRow(QString::fromStdString(name), combo);
+            combos_.emplace_back(name, combo);
+        }
+
+        if (vars_.empty() && tables_.empty()) {
+            form->addRow(new QLabel(
+                QString::fromUtf8(
+                    "В документе нет плейсхолдеров {{…}} или \\table{…}."),
+                container));
         }
 
         auto* scroll = new QScrollArea(this);
@@ -690,9 +826,18 @@ private:
         for (const auto& kv : edits_)
             values[kv.first] = kv.second->text().toUtf8().toStdString();
 
-        QString suggested =
-            QFileInfo(path_).absoluteDir().filePath(
-                QFileInfo(path_).completeBaseName() + "_filled.docx");
+        // Build the chosen table for each \table{name} (index 0 = skip).
+        std::map<std::string, docxform::TableData> tableData;
+        for (const auto& kv : combos_) {
+            int sel = kv.second->currentIndex();
+            if (sel >= 1 && sel - 1 < static_cast<int>(kinds_.size())) {
+                const docxform::TableKind& kind = kinds_[sel - 1];
+                if (kind.build) tableData[kv.first] = kind.build(kv.first);
+            }
+        }
+
+        QString suggested = QFileInfo(path_).absoluteDir().filePath(
+            QFileInfo(path_).completeBaseName() + "_filled.docx");
         QString outPath = QFileDialog::getSaveFileName(
             this, QString::fromUtf8("Сохранить документ"), suggested,
             QString::fromUtf8("Документ Word (*.docx)"));
@@ -706,7 +851,7 @@ private:
                 QString::fromUtf8("Не удалось разобрать исходный .docx."));
             return;
         }
-        std::string newXml = transformDocument(xml_, values);
+        std::string newXml = transformDocument(xml_, values, tableData);
         for (auto& m : members)
             if (m.first == "word/document.xml") m.second = newXml;
 
@@ -730,17 +875,23 @@ private:
     std::string zip_;
     std::string xml_;
     std::vector<std::string> vars_;
+    std::vector<std::string> tables_;
+    std::vector<docxform::TableKind> kinds_;
     std::vector<std::pair<std::string, QLineEdit*>> edits_;
+    std::vector<std::pair<std::string, QComboBox*>> combos_;
 };
 
 }  // namespace
 
 // Headless mode (no GUI), handy for scripting and testing:
-//   docxform --render <in.docx> <out.docx> NAME=VALUE [NAME=VALUE ...]
+//   docxform --render <in.docx> <out.docx> NAME=VALUE ... [+TABLE=kind_id ...]
+// A "+name=kind_id" argument fills the \table{name} placeholder with the table
+// kind whose id is kind_id (see tableKinds() in tablekinds.cpp).
 int renderHeadless(int argc, char** argv) {
     if (argc < 4) {
         std::fprintf(stderr,
-                     "Usage: %s --render <in.docx> <out.docx> [NAME=VALUE ...]\n",
+                     "Usage: %s --render <in.docx> <out.docx> "
+                     "[NAME=VALUE ...] [+TABLE=kind_id ...]\n",
                      argv[0]);
         return 1;
     }
@@ -754,18 +905,31 @@ int renderHeadless(int argc, char** argv) {
         std::fprintf(stderr, "Error: '%s' is not a valid .docx\n", argv[2]);
         return 1;
     }
+    std::vector<docxform::TableKind> kinds = docxform::tableKinds();
     std::map<std::string, std::string> values;
+    std::map<std::string, docxform::TableData> tableData;
     for (int i = 4; i < argc; ++i) {
         std::string a = argv[i];
         size_t eq = a.find('=');
-        if (eq != std::string::npos) values[a.substr(0, eq)] = a.substr(eq + 1);
+        if (eq == std::string::npos) continue;
+        if (!a.empty() && a[0] == '+') {  // table selection: +name=kind_id
+            std::string name = a.substr(1, eq - 1);
+            std::string kindId = a.substr(eq + 1);
+            for (const auto& k : kinds)
+                if (k.id == kindId && k.build) {
+                    tableData[name] = k.build(name);
+                    break;
+                }
+        } else {
+            values[a.substr(0, eq)] = a.substr(eq + 1);
+        }
     }
     std::vector<std::pair<std::string, std::string>> members;
     if (!listZipMembers(zip, members)) {
         std::fprintf(stderr, "Error: cannot parse '%s'\n", argv[2]);
         return 1;
     }
-    std::string newXml = transformDocument(xml, values);
+    std::string newXml = transformDocument(xml, values, tableData);
     for (auto& m : members)
         if (m.first == "word/document.xml") m.second = newXml;
     std::string bytes = buildZipStored(members);
@@ -809,7 +973,9 @@ int main(int argc, char** argv) {
     }
 
     std::vector<std::string> vars = collectVars(xml);
-    FormWindow w(path, std::move(zip), std::move(xml), std::move(vars));
+    std::vector<std::string> tables = collectTables(xml);
+    FormWindow w(path, std::move(zip), std::move(xml), std::move(vars),
+                 std::move(tables));
     w.show();
     return app.exec();
 }

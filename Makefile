@@ -45,12 +45,13 @@ docx2txt: docx2txt.cpp
 txt2docx: txt2docx.cpp
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LDLIBS)
 
-docxform: docxform.cpp
+docxform: docxform.cpp tablekinds.cpp tablekinds.h
 	@if [ -z "$(QT_LIBS)" ]; then \
 	  echo "Qt5 not found. Install it, e.g.: sudo apt install qtbase5-dev"; \
 	  exit 1; \
 	fi
-	$(CXX) $(CXXFLAGS) -fPIC $(QT_CFLAGS) -o $@ $< $(QT_LIBS) $(LDLIBS)
+	$(CXX) $(CXXFLAGS) -fPIC $(QT_CFLAGS) -o $@ docxform.cpp tablekinds.cpp \
+	    $(QT_LIBS) $(LDLIBS)
 
 clean:
 	rm -f $(BINARIES)
