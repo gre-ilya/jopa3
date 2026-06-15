@@ -711,38 +711,23 @@ std::vector<std::string> collectTables(const std::string& xml) {
     return order;
 }
 
-// Build a context snippet around the byte range [b,e) in the paragraph text P:
-// some text BEFORE the variable and some AFTER it. Boundaries are snapped to
-// word (and UTF-8) boundaries so neither a word nor a {{token}} is cut, and an
-// ellipsis marks where the paragraph was truncated. Placeholder tokens are kept
-// verbatim so the GUI can highlight them.
-std::string contextWindow(const std::string& P, size_t b, size_t e) {
-    const size_t kBefore = 90, kAfter = 120;  // bytes (UTF-8) on each side
-    auto isSpace = [](char c) {
-        return std::isspace(static_cast<unsigned char>(c)) != 0;
+// Extract the WHOLE sentence containing the byte range [b,e) in the paragraph
+// text P: from just after the previous .!? (or line break / paragraph start) to
+// the end of the sentence (its terminator included). Placeholder tokens are
+// kept verbatim so the GUI can highlight them.
+std::string sentenceAround(const std::string& P, size_t b, size_t e) {
+    auto isEnd = [](char c) {
+        return c == '.' || c == '!' || c == '?' || c == '\n' || c == '\r';
     };
-    auto isCont = [](char c) {  // UTF-8 continuation byte
-        return (static_cast<unsigned char>(c) & 0xC0) == 0x80;
-    };
-
-    size_t left = b > kBefore ? b - kBefore : 0;
-    size_t right = e + kAfter < P.size() ? e + kAfter : P.size();
-
-    if (left > 0) {  // start at a clean word boundary
-        while (left < b && isCont(P[left])) ++left;
-        while (left < b && !isSpace(P[left - 1])) ++left;
-    }
-    if (right < P.size()) {  // end at a clean word boundary
-        while (right > e && isCont(P[right])) --right;
-        while (right > e && !isSpace(P[right])) --right;
-    }
-    while (left < b && isSpace(P[left])) ++left;
-    while (right > e && isSpace(P[right - 1])) --right;
-
-    std::string s = P.substr(left, right - left);
-    if (left > 0) s = "… " + s;
-    if (right < P.size()) s += " …";
-    return s;
+    size_t left = b;
+    while (left > 0 && !isEnd(P[left - 1])) --left;
+    size_t right = e;
+    while (right < P.size() && !isEnd(P[right])) ++right;
+    if (right < P.size()) ++right;  // include the terminating .!?
+    while (left < b && std::isspace(static_cast<unsigned char>(P[left]))) ++left;
+    while (right > e && std::isspace(static_cast<unsigned char>(P[right - 1])))
+        --right;
+    return P.substr(left, right - left);
 }
 
 // Collect {{variable}} names with the sentence each first appears in, in
@@ -764,7 +749,7 @@ std::vector<std::pair<std::string, std::string>> collectVarsWithContext(
             std::string name;
             while (nextPlaceholder(P, pos, b, en, name)) {
                 if (seen.insert(name).second)
-                    out.emplace_back(name, contextWindow(P, b, en));
+                    out.emplace_back(name, sentenceAround(P, b, en));
                 pos = en;
             }
             i = close;
