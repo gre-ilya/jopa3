@@ -1,6 +1,7 @@
 # Built binaries
 /docx2txt
 /txt2docx
+/docxform
 
 # Generated artifacts
 *_images/
