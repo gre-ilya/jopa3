@@ -711,9 +711,28 @@ std::vector<std::string> collectTables(const std::string& xml) {
     return order;
 }
 
-// Collect placeholder names across the whole document, in first-seen order.
-std::vector<std::string> collectVars(const std::string& xml) {
-    std::vector<std::string> order;
+// Extract the sentence around the byte range [b,e) in P (placeholder tokens are
+// kept verbatim). Sentence bounds are the nearest .!? or line break.
+std::string sentenceAround(const std::string& P, size_t b, size_t e) {
+    auto isEnd = [](char c) {
+        return c == '.' || c == '!' || c == '?' || c == '\n' || c == '\r';
+    };
+    size_t left = b;
+    while (left > 0 && !isEnd(P[left - 1])) --left;
+    size_t right = e;
+    while (right < P.size() && !isEnd(P[right])) ++right;
+    if (right < P.size()) ++right;  // include the terminator
+    while (left < b && std::isspace(static_cast<unsigned char>(P[left]))) ++left;
+    while (right > e && std::isspace(static_cast<unsigned char>(P[right - 1])))
+        --right;
+    return P.substr(left, right - left);
+}
+
+// Collect {{variable}} names with the sentence each first appears in, in
+// first-seen order (unique by name).
+std::vector<std::pair<std::string, std::string>> collectVarsWithContext(
+    const std::string& xml) {
+    std::vector<std::pair<std::string, std::string>> out;
     std::set<std::string> seen;
     size_t i = 0;
     while ((i = xml.find('<', i)) != std::string::npos) {
@@ -727,7 +746,8 @@ std::vector<std::string> collectVars(const std::string& xml) {
             size_t pos = 0, b, en;
             std::string name;
             while (nextPlaceholder(P, pos, b, en, name)) {
-                if (seen.insert(name).second) order.push_back(name);
+                if (seen.insert(name).second)
+                    out.emplace_back(name, sentenceAround(P, b, en));
                 pos = en;
             }
             i = close;
@@ -737,7 +757,7 @@ std::vector<std::string> collectVars(const std::string& xml) {
         if (e == std::string::npos) break;
         i = e + 1;
     }
-    return order;
+    return out;
 }
 
 // ---- GUI ------------------------------------------------------------------
@@ -749,7 +769,8 @@ std::vector<std::string> collectVars(const std::string& xml) {
 class FormWindow : public QWidget {
 public:
     FormWindow(const QString& path, std::string zip, std::string xml,
-               std::vector<std::string> vars, std::vector<std::string> tables)
+               std::vector<std::pair<std::string, std::string>> vars,
+               std::vector<std::string> tables)
         : path_(path),
           zip_(std::move(zip)),
           xml_(std::move(xml)),
@@ -779,11 +800,29 @@ public:
                                    container);
             form->addRow(lbl);
         }
-        for (const std::string& name : vars_) {
-            auto* edit = new QLineEdit(container);
+        for (const auto& v : vars_) {
+            const std::string& name = v.first;
+            const std::string& context = v.second;
+
+            // Field column = context sentence (with the placeholder shown) on
+            // top of the input box, so the user sees what they are filling in.
+            auto* fieldW = new QWidget(container);
+            auto* col = new QVBoxLayout(fieldW);
+            col->setContentsMargins(0, 0, 0, 0);
+            col->setSpacing(2);
+            if (!context.empty()) {
+                auto* ctx = new QLabel(contextHtml(context, name), fieldW);
+                ctx->setTextFormat(Qt::RichText);
+                ctx->setWordWrap(true);
+                ctx->setStyleSheet("color:#555;");
+                col->addWidget(ctx);
+            }
+            auto* edit = new QLineEdit(fieldW);
             edit->setPlaceholderText(QString::fromUtf8("значение для %1")
                                          .arg(QString::fromStdString(name)));
-            form->addRow(QString::fromStdString(name), edit);
+            col->addWidget(edit);
+
+            form->addRow(QString::fromStdString(name), fieldW);
             edits_.emplace_back(name, edit);
         }
 
@@ -821,6 +860,29 @@ public:
     }
 
 private:
+    // Render a context sentence as rich text: the current variable's
+    // placeholder is shown highlighted (the "blank" being filled), any other
+    // {{...}} in the sentence are greyed so they read as separate fields.
+    static QString contextHtml(const std::string& ctx,
+                               const std::string& thisName) {
+        QString html;
+        size_t cur = 0, pos = 0, b, e;
+        std::string nm;
+        while (nextPlaceholder(ctx, pos, b, e, nm)) {
+            html += QString::fromStdString(ctx.substr(cur, b - cur)).toHtmlEscaped();
+            QString token = QString::fromStdString(nm).toHtmlEscaped();
+            if (nm == thisName)
+                html += "<span style=\"background-color:#fff3a0;font-weight:bold;"
+                        "\">" + token + "</span>";
+            else
+                html += "<span style=\"color:#999;\">{{" + token + "}}</span>";
+            cur = e;
+            pos = e;
+        }
+        html += QString::fromStdString(ctx.substr(cur)).toHtmlEscaped();
+        return html;
+    }
+
     void onGenerate() {
         std::map<std::string, std::string> values;
         for (const auto& kv : edits_)
@@ -874,7 +936,7 @@ private:
     QString path_;
     std::string zip_;
     std::string xml_;
-    std::vector<std::string> vars_;
+    std::vector<std::pair<std::string, std::string>> vars_;  // name, context
     std::vector<std::string> tables_;
     std::vector<docxform::TableKind> kinds_;
     std::vector<std::pair<std::string, QLineEdit*>> edits_;
@@ -882,6 +944,27 @@ private:
 };
 
 }  // namespace
+
+// Headless: list each {{variable}} with its context sentence, then each
+// \table{name} placeholder. Useful for inspection/integration.
+//   docxform --vars <in.docx>
+int listVars(int argc, char** argv) {
+    if (argc < 3) {
+        std::fprintf(stderr, "Usage: %s --vars <in.docx>\n", argv[0]);
+        return 1;
+    }
+    std::string zip, xml;
+    if (!readWholeFile(argv[2], zip) ||
+        !extractZipMember(zip, "word/document.xml", xml)) {
+        std::fprintf(stderr, "Error: cannot read .docx '%s'\n", argv[2]);
+        return 1;
+    }
+    for (const auto& v : collectVarsWithContext(xml))
+        std::printf("VAR\t%s\t%s\n", v.first.c_str(), v.second.c_str());
+    for (const auto& t : collectTables(xml))
+        std::printf("TABLE\t%s\n", t.c_str());
+    return 0;
+}
 
 // Headless mode (no GUI), handy for scripting and testing:
 //   docxform --render <in.docx> <out.docx> NAME=VALUE ... [+TABLE=kind_id ...]
@@ -945,6 +1028,8 @@ int renderHeadless(int argc, char** argv) {
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "--render") == 0)
         return renderHeadless(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "--vars") == 0)
+        return listVars(argc, argv);
 
     QApplication app(argc, argv);
 
@@ -972,7 +1057,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::vector<std::string> vars = collectVars(xml);
+    std::vector<std::pair<std::string, std::string>> vars =
+        collectVarsWithContext(xml);
     std::vector<std::string> tables = collectTables(xml);
     FormWindow w(path, std::move(zip), std::move(xml), std::move(vars),
                  std::move(tables));
