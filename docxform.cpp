@@ -21,7 +21,7 @@
 // which kind to insert.
 //
 // Build:  make docxform
-//   or:   g++ -O2 -std=c++17 -fPIC docxform.cpp tablekinds.cpp -o docxform \
+//   or:   g++ -O2 -std=c++17 -fPIC docxform.cpp tablekinds.cpp -o docxform
 //             $(pkg-config --cflags --libs Qt5Widgets) -lz
 // Usage:  ./docxform [template.docx]   (without an argument it asks for a file)
 

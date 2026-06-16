@@ -172,6 +172,40 @@ g++ -O2 -std=c++17 -fPIC -DDOCXFORM_NO_MAIN \
 (встроенный `main` с GUI и режимами `--render` / `--vars`). Набор доступных
 видов таблиц настраивается, как обычно, в `tablekinds.cpp`.
 
+### Подключение в qmake-проект (3rd-party)
+
+В комплекте есть файл `docxform.pri`. Скопируйте каталог `docxform` к себе
+(например, в `third_party/docxform`) и в своём `.pro` подключите один файл:
+
+```pro
+include(third_party/docxform/docxform.pri)
+```
+
+`docxform.pri` сам добавит исходники и заголовки (`docxform.cpp`,
+`tablekinds.cpp`, `docxform.h`, `tablekinds.h`), пропишет `QT += widgets`,
+`INCLUDEPATH`, слинкует zlib (`LIBS += -lz`) и определит `DEFINES +=
+DOCXFORM_NO_MAIN`, чтобы убрать встроенный `main()` (ваш `main` остаётся
+вашим). Пути внутри `.pri` заданы через `$$PWD`, так что include работает из
+любого места.
+
+После этого вызывайте `docxform::openTemplateForm()` (см. пример выше);
+`#include "docxform.h"` найдётся через `INCLUDEPATH`.
+
+Минимальный пример `.pro`:
+
+```pro
+TEMPLATE = app
+TARGET   = myapp
+CONFIG  += c++17
+SOURCES += main.cpp
+include(third_party/docxform/docxform.pri)
+```
+
+Требования те же, что и для standalone-сборки: Qt5 Widgets и zlib. Если ваш
+проект собирает несколько целей или использует другие пути — `.pri` это не
+меняет, он только дописывает свои `SOURCES`/`HEADERS`/`LIBS` к текущему
+проекту.
+
 ## Коды возврата (режим `--render`)
 
 - `0` — успешно.
