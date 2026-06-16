@@ -20,6 +20,14 @@
 // is where you add new ones. The GUI shows a drop-down per \table{name} to pick
 // which kind to insert.
 //
+// Variants: a \variant{name|text 1|text 2|...} placeholder lets the user PICK
+// one of several wordings. `name` may be non-ASCII and contain spaces; the
+// options are the |-separated parts after it (taken verbatim). The GUI shows a
+// drop-down per variant and substitutes the chosen text (highlighted yellow).
+//
+// The form lists variables, variants and tables in the SAME order they appear
+// in the document (interleaved, not grouped by type).
+//
 // Build:  make docxform
 //   or:   g++ -O2 -std=c++17 -fPIC docxform.cpp tablekinds.cpp -o docxform
 //             $(pkg-config --cflags --libs Qt5Widgets) -lz
@@ -466,6 +474,96 @@ bool nextTablePlaceholder(const std::string& s, size_t from, size_t& begin,
     return false;
 }
 
+// Find the next \variant{name|opt1|opt2|...} at or after `from`. The name is the
+// text before the first '|' (trimmed of ASCII whitespace; it may contain spaces
+// and non-ASCII bytes, e.g. Russian). The options are the '|'-separated parts
+// after the name, taken VERBATIM (not trimmed), so inline substitutions keep
+// their exact spacing. A valid variant needs a non-empty name and >= 1 option.
+bool nextVariantPlaceholder(const std::string& s, size_t from, size_t& begin,
+                            size_t& end, std::string& name,
+                            std::vector<std::string>& options) {
+    static const std::string kMarker = "\\variant{";
+    size_t p = from;
+    while ((p = s.find(kMarker, p)) != std::string::npos) {
+        size_t close = s.find('}', p + kMarker.size());
+        if (close == std::string::npos) return false;
+        std::string inner =
+            s.substr(p + kMarker.size(), close - (p + kMarker.size()));
+        std::vector<std::string> parts;
+        size_t start = 0;
+        for (;;) {
+            size_t bar = inner.find('|', start);
+            if (bar == std::string::npos) {
+                parts.push_back(inner.substr(start));
+                break;
+            }
+            parts.push_back(inner.substr(start, bar - start));
+            start = bar + 1;
+        }
+        std::string nm = parts.empty() ? std::string() : parts.front();
+        size_t a = 0, b = nm.size();  // trim ASCII whitespace around the name
+        while (a < b && std::isspace(static_cast<unsigned char>(nm[a]))) ++a;
+        while (b > a && std::isspace(static_cast<unsigned char>(nm[b - 1]))) --b;
+        nm = nm.substr(a, b - a);
+        if (!nm.empty() && parts.size() >= 2) {
+            begin = p;
+            end = close + 1;
+            name = nm;
+            options.assign(parts.begin() + 1, parts.end());
+            return true;
+        }
+        p = close + 1;  // not a valid variant; keep scanning
+    }
+    return false;
+}
+
+// ---- Unified token model --------------------------------------------------
+//
+// A template has three kinds of fillable placeholders. To present them in the
+// GUI (and list them headless) in DOCUMENT ORDER, we scan a paragraph for the
+// earliest token of any kind and walk forward.
+
+enum class FieldKind { Var, Variant, Table };
+
+struct Token {
+    FieldKind kind;
+    size_t begin = 0;
+    size_t end = 0;
+    std::string name;
+    std::vector<std::string> options;  // Variant only
+};
+
+// Find the earliest of {{var}}, \variant{...} or \table{name} at or after
+// `from`. The three syntaxes never overlap, so picking the smallest begin is
+// unambiguous. Returns false when no token remains.
+bool nextAnyToken(const std::string& s, size_t from, Token& tok) {
+    size_t best = std::string::npos;
+    Token chosen;
+    size_t b, e;
+    std::string nm;
+
+    if (nextPlaceholder(s, from, b, e, nm) && b < best) {
+        best = b;
+        chosen = {FieldKind::Var, b, e, nm, {}};
+    }
+    {
+        std::vector<std::string> opts;
+        std::string vn;
+        if (nextVariantPlaceholder(s, from, b, e, vn, opts) && b < best) {
+            best = b;
+            chosen = {FieldKind::Variant, b, e, vn, std::move(opts)};
+        }
+    }
+    if (nextTablePlaceholder(s, from, b, e, nm) && b < best) {
+        best = b;
+        chosen = {FieldKind::Table, b, e, nm, {}};
+    }
+
+    if (best == std::string::npos) return false;
+    tok = std::move(chosen);
+    return true;
+}
+
 // Concatenated text of a paragraph's simple runs (in document order).
 std::string concatParagraphText(const std::string& inner) {
     std::string P;
@@ -493,10 +591,15 @@ std::string concatParagraphText(const std::string& inner) {
 
 // ---- Document transformation ----------------------------------------------
 
-// Rebuild one paragraph's inner XML, replacing each {{name}} (matched across
-// the paragraph's merged simple-run text) with its value, highlighted yellow.
-std::string transformParagraph(const std::string& inner,
-                               const std::map<std::string, std::string>& values) {
+// Rebuild one paragraph's inner XML, replacing each {{name}} and each
+// \variant{...} (matched across the paragraph's merged simple-run text) with its
+// value, highlighted yellow. `values` maps a variable name to its text;
+// `variantChoices` maps a variant name to the chosen option text (when a variant
+// is not listed, its first option is used).
+std::string transformParagraph(
+    const std::string& inner,
+    const std::map<std::string, std::string>& values,
+    const std::map<std::string, std::string>& variantChoices) {
     struct Tok {
         bool simple;
         std::string raw;   // verbatim XML (non-simple content)
@@ -547,14 +650,33 @@ std::string transformParagraph(const std::string& inner,
     }
     if (!verb.empty()) toks.push_back({false, std::move(verb), "", "", 0});
 
-    struct M { size_t b, e; std::string name; };
+    // Resolve every {{var}} / \variant{...} token to its replacement text up
+    // front. \table{...} tokens are handled at the paragraph level (see
+    // transformDocument) and are left untouched here. nextAnyToken yields tokens
+    // in increasing position, so `ms` stays sorted by begin.
+    struct M { size_t b, e; std::string repl; bool hl; };
     std::vector<M> ms;
     {
-        size_t pos = 0, b, e;
-        std::string nm;
-        while (nextPlaceholder(P, pos, b, e, nm)) {
-            ms.push_back({b, e, nm});
-            pos = e;
+        Token tok;
+        size_t pos = 0;
+        while (nextAnyToken(P, pos, tok)) {
+            if (tok.kind == FieldKind::Var) {
+                auto it = values.find(tok.name);
+                std::string val = (it != values.end())
+                                      ? it->second
+                                      : ("{{" + tok.name + "}}");
+                ms.push_back({tok.begin, tok.end, std::move(val), true});
+            } else if (tok.kind == FieldKind::Variant) {
+                auto it = variantChoices.find(tok.name);
+                std::string val =
+                    (it != variantChoices.end())
+                        ? it->second
+                        : (tok.options.empty() ? std::string()
+                                               : tok.options.front());
+                ms.push_back({tok.begin, tok.end, std::move(val), true});
+            }
+            // FieldKind::Table: leave the literal \table{...} in place.
+            pos = tok.end;
         }
     }
     if (ms.empty()) return inner;  // nothing to do: keep paragraph byte-for-byte
@@ -588,10 +710,7 @@ std::string transformParagraph(const std::string& inner,
         while (x < g + len) {
             if (beginAt[x] >= 0) {  // a placeholder starts here -> value run
                 const M& m = ms[beginAt[x]];
-                auto it = values.find(m.name);
-                std::string val =
-                    (it != values.end()) ? it->second : ("{{" + m.name + "}}");
-                out += emitRun(t.rpr, val, true);
+                out += emitRun(t.rpr, m.repl, m.hl);
                 x = m.e;  // skip the whole match (may extend past this run)
                 continue;
             }
@@ -613,10 +732,13 @@ std::string transformParagraph(const std::string& inner,
 //   - if (at body level) it holds a \table{name} placeholder whose table the
 //     user selected, replace the WHOLE paragraph with the generated <w:tbl>;
 //   - otherwise substitute its {{variables}} as usual.
-// `tables` maps a placeholder name to the table content chosen for it.
-std::string transformDocument(const std::string& xml,
-                              const std::map<std::string, std::string>& values,
-                              const std::map<std::string, docxform::TableData>& tables) {
+// `tables` maps a placeholder name to the table content chosen for it;
+// `variantChoices` maps a \variant{...} name to its chosen option text.
+std::string transformDocument(
+    const std::string& xml,
+    const std::map<std::string, std::string>& values,
+    const std::map<std::string, std::string>& variantChoices,
+    const std::map<std::string, docxform::TableData>& tables) {
     std::string out;
     size_t i = 0, copyFrom = 0;
     int tableDepth = 0;
@@ -669,7 +791,7 @@ std::string transformDocument(const std::string& xml,
             }
 
             out += xml.substr(copyFrom, e + 1 - copyFrom);  // up to <w:p ...>
-            out += transformParagraph(inner, values);
+            out += transformParagraph(inner, values, variantChoices);
             copyFrom = close;
             i = close;
             continue;
@@ -683,48 +805,30 @@ std::string transformDocument(const std::string& xml,
     return out;
 }
 
-// Collect \table{name} placeholder names across the document, first-seen order.
-std::vector<std::string> collectTables(const std::string& xml) {
-    std::vector<std::string> order;
-    std::set<std::string> seen;
-    size_t i = 0;
-    while ((i = xml.find('<', i)) != std::string::npos) {
-        if (i + 1 < xml.size() && xml[i + 1] != '/' && tagIs(xml, i, "p")) {
-            size_t e = xml.find('>', i);
-            if (e == std::string::npos) break;
-            if (xml[e - 1] == '/') { i = e + 1; continue; }
-            size_t close = findClose(xml, e + 1, "p");
-            if (close == std::string::npos) break;
-            std::string P = concatParagraphText(xml.substr(e + 1, close - e - 1));
-            size_t pos = 0, b, en;
-            std::string name;
-            while (nextTablePlaceholder(P, pos, b, en, name)) {
-                if (seen.insert(name).second) order.push_back(name);
-                pos = en;
-            }
-            i = close;
-            continue;
-        }
-        size_t e = xml.find('>', i);
-        if (e == std::string::npos) break;
-        i = e + 1;
-    }
-    return order;
-}
-
-// A paragraph that introduces one or more {{variables}}: the paragraph text
-// (placeholder tokens kept) and the new variable names it introduces, in order.
-struct ParaGroup {
-    std::string text;
-    std::vector<std::string> vars;
+// A fillable item discovered in a template: a {{variable}}, a \variant{...}
+// choice, or a \table{...} placeholder.
+struct FormField {
+    FieldKind kind;
+    std::string name;
+    std::vector<std::string> options;  // Variant: the available choices
 };
 
-// Group variables by the paragraph they FIRST appear in. Each variable is
-// listed once (globally), under the paragraph that introduced it; paragraphs
-// without any new variable are skipped. This drives the grouped GUI layout.
-std::vector<ParaGroup> collectVarGroups(const std::string& xml) {
-    std::vector<ParaGroup> groups;
-    std::set<std::string> seen;
+// A paragraph that introduces one or more fillable items: the paragraph text
+// (placeholder tokens kept, for context) and the NEW items it introduces, in
+// document order. An item seen in an earlier paragraph is not repeated.
+struct FormBlock {
+    std::string text;
+    std::vector<FormField> fields;
+};
+
+// Walk the document paragraph by paragraph and collect fillable items in the
+// exact order they appear (variables, variants and tables interleaved). Each
+// item is listed once, under the paragraph of its first occurrence; paragraphs
+// without any new item are skipped. This single ordered list drives both the GUI
+// layout and the headless listing, so they always mirror the document.
+std::vector<FormBlock> collectFormBlocks(const std::string& xml) {
+    std::vector<FormBlock> blocks;
+    std::set<std::string> seenVar, seenVariant, seenTable;
     size_t i = 0;
     while ((i = xml.find('<', i)) != std::string::npos) {
         if (i + 1 < xml.size() && xml[i + 1] != '/' && tagIs(xml, i, "p")) {
@@ -734,14 +838,23 @@ std::vector<ParaGroup> collectVarGroups(const std::string& xml) {
             size_t close = findClose(xml, e + 1, "p");
             if (close == std::string::npos) break;
             std::string P = concatParagraphText(xml.substr(e + 1, close - e - 1));
-            std::vector<std::string> newVars;
-            size_t pos = 0, b, en;
-            std::string name;
-            while (nextPlaceholder(P, pos, b, en, name)) {
-                if (seen.insert(name).second) newVars.push_back(name);
-                pos = en;
+            std::vector<FormField> fields;
+            Token tok;
+            size_t pos = 0;
+            while (nextAnyToken(P, pos, tok)) {
+                bool isNew = false;
+                if (tok.kind == FieldKind::Var)
+                    isNew = seenVar.insert(tok.name).second;
+                else if (tok.kind == FieldKind::Variant)
+                    isNew = seenVariant.insert(tok.name).second;
+                else
+                    isNew = seenTable.insert(tok.name).second;
+                if (isNew)
+                    fields.push_back({tok.kind, tok.name, tok.options});
+                pos = tok.end;
             }
-            if (!newVars.empty()) groups.push_back({P, std::move(newVars)});
+            if (!fields.empty())
+                blocks.push_back({std::move(P), std::move(fields)});
             i = close;
             continue;
         }
@@ -749,38 +862,45 @@ std::vector<ParaGroup> collectVarGroups(const std::string& xml) {
         if (e == std::string::npos) break;
         i = e + 1;
     }
-    return groups;
+    return blocks;
 }
 
 // ---- GUI ------------------------------------------------------------------
 
-// A QWidget-only window (no Q_OBJECT, so no moc is needed): one input field per
-// {{variable}}, one drop-down per \table{...}, and a button that writes the
-// filled .docx. The widget is self-contained, so it can be embedded in another
-// Qt application as-is.
+// A QWidget-only window (no Q_OBJECT, so no moc is needed): one control per
+// fillable item — a text field for a {{variable}}, a drop-down for a
+// \variant{...} and a drop-down for a \table{...} — laid out in document order,
+// plus a button that writes the filled .docx. The widget is self-contained, so
+// it can be embedded in another Qt application as-is.
 class FormWindow : public QWidget {
 public:
     FormWindow(const QString& path, std::string zip, std::string xml,
-               std::vector<ParaGroup> groups, std::vector<std::string> tables)
+               std::vector<FormBlock> blocks)
         : path_(path),
           zip_(std::move(zip)),
           xml_(std::move(xml)),
-          groups_(std::move(groups)),
-          tables_(std::move(tables)),
+          blocks_(std::move(blocks)),
           kinds_(docxform::tableKinds()) {
         setWindowTitle(QString::fromUtf8("docxform — шаблонизатор .docx"));
         resize(560, 540);
 
-        int varCount = 0;
-        for (const auto& g : groups_) varCount += static_cast<int>(g.vars.size());
+        int nVar = 0, nVariant = 0, nTable = 0;
+        for (const FormBlock& blk : blocks_)
+            for (const FormField& f : blk.fields) {
+                if (f.kind == FieldKind::Var) ++nVar;
+                else if (f.kind == FieldKind::Variant) ++nVariant;
+                else ++nTable;
+            }
 
         auto* root = new QVBoxLayout(this);
 
         QString head =
-            QString::fromUtf8("Шаблон: %1\nПеременных: %2,  таблиц: %3")
+            QString::fromUtf8(
+                "Шаблон: %1\nПеременных: %2,  вариантов: %3,  таблиц: %4")
                 .arg(QFileInfo(path_).fileName())
-                .arg(varCount)
-                .arg(static_cast<int>(tables_.size()));
+                .arg(nVar)
+                .arg(nVariant)
+                .arg(nTable);
         auto* header = new QLabel(head, this);
         header->setWordWrap(true);
         root->addWidget(header);
@@ -789,52 +909,55 @@ public:
         auto* form = new QFormLayout(container);
         form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 
-        if (!groups_.empty()) {
-            form->addRow(new QLabel(
-                QString::fromUtf8("— Переменные {{…}} —"), container));
-        }
-        // One block per paragraph: the paragraph text (its variables
-        // highlighted) shown once, then an input field for each variable.
-        for (const ParaGroup& g : groups_) {
-            std::set<std::string> hl(g.vars.begin(), g.vars.end());
-            auto* ctx = new QLabel(paragraphHtml(g.text, hl), container);
+        // One block per paragraph, in document order. The paragraph (its items
+        // highlighted) is shown once, then a control per item in the order the
+        // items appear in the paragraph — so the whole form mirrors the document
+        // instead of grouping all variables, then all tables.
+        for (const FormBlock& blk : blocks_) {
+            std::set<std::string> active;
+            for (const FormField& f : blk.fields) active.insert(f.name);
+
+            auto* ctx = new QLabel(contextHtml(blk.text, active), container);
             ctx->setTextFormat(Qt::RichText);
             ctx->setWordWrap(true);
             ctx->setStyleSheet("color:#555; margin-top:8px;");
             form->addRow(ctx);  // full-width context line
 
-            for (const std::string& name : g.vars) {
-                QString qname = QString::fromStdString(name);
-                auto* edit = new QLineEdit(container);
-                // Short, clean prompt inside the field (a long paragraph would be
-                // clipped by the single-line edit); the full guidance lives in
-                // the tooltip.
-                edit->setPlaceholderText(
-                    QString::fromUtf8("значение для %1").arg(qname));
-                edit->setToolTip(fieldHintHtml(name));
-                form->addRow(qname, edit);
-                edits_.emplace_back(name, edit);
+            for (const FormField& f : blk.fields) {
+                QString qname = QString::fromStdString(f.name);
+                if (f.kind == FieldKind::Var) {
+                    auto* edit = new QLineEdit(container);
+                    // Short prompt in the field (a long paragraph would be
+                    // clipped); full guidance lives in the tooltip.
+                    edit->setPlaceholderText(
+                        QString::fromUtf8("значение для %1").arg(qname));
+                    edit->setToolTip(varHintHtml(f.name));
+                    form->addRow(qname, edit);
+                    edits_.emplace_back(f.name, edit);
+                } else if (f.kind == FieldKind::Variant) {
+                    auto* combo = new QComboBox(container);
+                    for (const std::string& opt : f.options)
+                        combo->addItem(QString::fromStdString(opt));
+                    combo->setToolTip(variantHintHtml(f.name));
+                    form->addRow(qname, combo);
+                    variantCtls_.push_back({f.name, combo, f.options});
+                } else {  // Table
+                    auto* combo = new QComboBox(container);
+                    combo->addItem(QString::fromUtf8("— не вставлять —"));  // 0
+                    for (const docxform::TableKind& k : kinds_)
+                        combo->addItem(QString::fromStdString(k.title));
+                    if (!kinds_.empty()) combo->setCurrentIndex(1);  // first kind
+                    combo->setToolTip(tableHintHtml(f.name));
+                    form->addRow(qname, combo);
+                    tableCombos_.emplace_back(f.name, combo);
+                }
             }
         }
 
-        if (!tables_.empty()) {
+        if (blocks_.empty()) {
             form->addRow(new QLabel(
-                QString::fromUtf8("— Таблицы \\table{…} —"), container));
-        }
-        for (const std::string& name : tables_) {
-            auto* combo = new QComboBox(container);
-            combo->addItem(QString::fromUtf8("— не вставлять —"));  // index 0
-            for (const docxform::TableKind& k : kinds_)
-                combo->addItem(QString::fromStdString(k.title));
-            if (!kinds_.empty()) combo->setCurrentIndex(1);  // first real kind
-            form->addRow(QString::fromStdString(name), combo);
-            combos_.emplace_back(name, combo);
-        }
-
-        if (groups_.empty() && tables_.empty()) {
-            form->addRow(new QLabel(
-                QString::fromUtf8(
-                    "В документе нет плейсхолдеров {{…}} или \\table{…}."),
+                QString::fromUtf8("В документе нет плейсхолдеров {{…}}, "
+                                  "\\variant{…} или \\table{…}."),
                 container));
         }
 
@@ -851,31 +974,46 @@ public:
     }
 
 private:
-    // Render a paragraph as rich text: each {{name}} in `highlight` is shown as
-    // its name in a yellow box (the blanks to fill, matching the fields below);
-    // any other {{...}} is greyed.
-    static QString paragraphHtml(const std::string& text,
-                                 const std::set<std::string>& highlight) {
+    // Render a paragraph as rich text for a block's context line. Items in
+    // `active` (those with a control right below this line) are highlighted; the
+    // same placeholder introduced by an earlier block is greyed. Variants get a
+    // ▾ marker; tables show a badge (the paragraph becomes the table).
+    static QString contextHtml(const std::string& text,
+                               const std::set<std::string>& active) {
         QString html;
-        size_t cur = 0, pos = 0, b, e;
-        std::string nm;
-        while (nextPlaceholder(text, pos, b, e, nm)) {
-            html += QString::fromStdString(text.substr(cur, b - cur)).toHtmlEscaped();
-            QString token = QString::fromStdString(nm).toHtmlEscaped();
-            if (highlight.count(nm))
-                html += "<span style=\"background-color:#fff3a0;font-weight:bold;"
-                        "\">" + token + "</span>";
-            else
-                html += "<span style=\"color:#999;\">{{" + token + "}}</span>";
-            cur = e;
-            pos = e;
+        size_t cur = 0, pos = 0;
+        Token tok;
+        while (nextAnyToken(text, pos, tok)) {
+            html += QString::fromStdString(text.substr(cur, tok.begin - cur))
+                        .toHtmlEscaped();
+            QString name = QString::fromStdString(tok.name).toHtmlEscaped();
+            bool on = active.count(tok.name) != 0;
+            if (tok.kind == FieldKind::Table) {
+                QString badge = QString::fromUtf8("таблица: ") + name;
+                html += on ? ("<span style=\"background-color:#d0e0ff;"
+                              "font-weight:bold;\">" + badge + "</span>")
+                           : ("<span style=\"color:#999;\">[" + badge + "]</span>");
+            } else {
+                QString shown = name;
+                if (tok.kind == FieldKind::Variant)
+                    shown += QString::fromUtf8(" \xe2\x96\xbe");  // ▾
+                if (on)
+                    html += "<span style=\"background-color:#fff3a0;"
+                            "font-weight:bold;\">" + shown + "</span>";
+                else if (tok.kind == FieldKind::Variant)
+                    html += "<span style=\"color:#999;\">" + shown + "</span>";
+                else
+                    html += "<span style=\"color:#999;\">{{" + name + "}}</span>";
+            }
+            cur = tok.end;
+            pos = tok.end;
         }
         html += QString::fromStdString(text.substr(cur)).toHtmlEscaped();
         return html;
     }
 
-    // The general filling rules, shared by every field. Kept as one paragraph so
-    // the help text and the per-field tooltip stay in sync.
+    // The general filling rules, shared by every variable field. Kept as one
+    // paragraph so the help text and the per-field tooltip stay in sync.
     static QString fillingRules() {
         return QString::fromUtf8(
             "Введённое значение подставляется как есть во всех местах документа, "
@@ -884,9 +1022,8 @@ private:
             "плейсхолдер будет удалён из итогового файла.");
     }
 
-    // Full guidance for one variable — used as the field's tooltip. A whole
-    // paragraph rather than a single sentence.
-    static QString fieldHintHtml(const std::string& name) {
+    // Full guidance for one variable — used as the field's tooltip.
+    static QString varHintHtml(const std::string& name) {
         QString qname = QString::fromStdString(name).toHtmlEscaped();
         return QString::fromUtf8(
                    "<b>%1</b> — введите значение для переменной "
@@ -894,14 +1031,40 @@ private:
             .arg(qname, fillingRules());
     }
 
+    // Tooltip for a \variant{...} drop-down.
+    static QString variantHintHtml(const std::string& name) {
+        QString qname = QString::fromStdString(name).toHtmlEscaped();
+        return QString::fromUtf8(
+                   "<b>%1</b> — выберите один из вариантов текста. Выбранный "
+                   "вариант будет подставлен в документ и выделен жёлтым.")
+            .arg(qname);
+    }
+
+    // Tooltip for a \table{...} drop-down.
+    static QString tableHintHtml(const std::string& name) {
+        QString qname = QString::fromStdString(name).toHtmlEscaped();
+        return QString::fromUtf8(
+                   "<b>%1</b> — выберите вид таблицы для вставки на место "
+                   "\\table{%1}, либо «— не вставлять —».")
+            .arg(qname);
+    }
+
     void onGenerate() {
         std::map<std::string, std::string> values;
         for (const auto& kv : edits_)
             values[kv.first] = kv.second->text().toUtf8().toStdString();
 
+        // The chosen text for each \variant{name} (the selected drop-down item).
+        std::map<std::string, std::string> variantChoices;
+        for (const auto& vc : variantCtls_) {
+            int sel = vc.combo->currentIndex();
+            if (sel >= 0 && sel < static_cast<int>(vc.options.size()))
+                variantChoices[vc.name] = vc.options[sel];
+        }
+
         // Build the chosen table for each \table{name} (index 0 = skip).
         std::map<std::string, docxform::TableData> tableData;
-        for (const auto& kv : combos_) {
+        for (const auto& kv : tableCombos_) {
             int sel = kv.second->currentIndex();
             if (sel >= 1 && sel - 1 < static_cast<int>(kinds_.size())) {
                 const docxform::TableKind& kind = kinds_[sel - 1];
@@ -924,7 +1087,8 @@ private:
                 QString::fromUtf8("Не удалось разобрать исходный .docx."));
             return;
         }
-        std::string newXml = transformDocument(xml_, values, tableData);
+        std::string newXml =
+            transformDocument(xml_, values, variantChoices, tableData);
         for (auto& m : members)
             if (m.first == "word/document.xml") m.second = newXml;
 
@@ -944,14 +1108,21 @@ private:
             QString::fromUtf8("Документ сохранён:\n%1").arg(outPath));
     }
 
+    // A \variant{...} control plus the option texts backing its drop-down.
+    struct VariantCtl {
+        std::string name;
+        QComboBox* combo;
+        std::vector<std::string> options;
+    };
+
     QString path_;
     std::string zip_;
     std::string xml_;
-    std::vector<ParaGroup> groups_;  // variables grouped by paragraph
-    std::vector<std::string> tables_;
+    std::vector<FormBlock> blocks_;  // fillable items in document order
     std::vector<docxform::TableKind> kinds_;
-    std::vector<std::pair<std::string, QLineEdit*>> edits_;
-    std::vector<std::pair<std::string, QComboBox*>> combos_;
+    std::vector<std::pair<std::string, QLineEdit*>> edits_;        // {{var}}
+    std::vector<VariantCtl> variantCtls_;                          // \variant{}
+    std::vector<std::pair<std::string, QComboBox*>> tableCombos_;  // \table{}
 };
 
 }  // namespace
@@ -976,19 +1147,22 @@ QWidget* openTemplateForm(const QString& templatePath, QString* error,
         return fail(QString::fromUtf8(
             "Это не похоже на .docx (нет word/document.xml)."));
 
-    std::vector<ParaGroup> groups = collectVarGroups(xml);
-    std::vector<std::string> tables = collectTables(xml);
+    std::vector<FormBlock> blocks = collectFormBlocks(xml);
     auto* w = new FormWindow(templatePath, std::move(zip), std::move(xml),
-                             std::move(groups), std::move(tables));
+                             std::move(blocks));
     if (parent) w->setParent(parent, w->windowFlags());
     return w;
 }
 
 }  // namespace docxform
 
-// Headless: list each {{variable}} with its context sentence, then each
-// \table{name} placeholder. Useful for inspection/integration.
+// Headless: list every fillable item in DOCUMENT ORDER, one per line. Useful
+// for inspection/integration.
 //   docxform --vars <in.docx>
+// Output (tab-separated):
+//   VAR\t<name>\t<paragraph context>
+//   VARIANT\t<name>\t<opt1>|<opt2>|...
+//   TABLE\t<name>
 int listVars(int argc, char** argv) {
     if (argc < 3) {
         std::fprintf(stderr, "Usage: %s --vars <in.docx>\n", argv[0]);
@@ -1000,23 +1174,39 @@ int listVars(int argc, char** argv) {
         std::fprintf(stderr, "Error: cannot read .docx '%s'\n", argv[2]);
         return 1;
     }
-    for (const auto& g : collectVarGroups(xml))
-        for (const auto& name : g.vars)
-            std::printf("VAR\t%s\t%s\n", name.c_str(), g.text.c_str());
-    for (const auto& t : collectTables(xml))
-        std::printf("TABLE\t%s\n", t.c_str());
+    for (const auto& blk : collectFormBlocks(xml)) {
+        for (const auto& f : blk.fields) {
+            if (f.kind == FieldKind::Var) {
+                std::printf("VAR\t%s\t%s\n", f.name.c_str(), blk.text.c_str());
+            } else if (f.kind == FieldKind::Variant) {
+                std::string joined;
+                for (size_t k = 0; k < f.options.size(); ++k) {
+                    if (k) joined += "|";
+                    joined += f.options[k];
+                }
+                std::printf("VARIANT\t%s\t%s\n", f.name.c_str(), joined.c_str());
+            } else {
+                std::printf("TABLE\t%s\n", f.name.c_str());
+            }
+        }
+    }
     return 0;
 }
 
 // Headless mode (no GUI), handy for scripting and testing:
-//   docxform --render <in.docx> <out.docx> NAME=VALUE ... [+TABLE=kind_id ...]
+//   docxform --render <in.docx> <out.docx>
+//       NAME=VALUE ... [~VARIANT=choice ...] [+TABLE=kind_id ...]
 // A "+name=kind_id" argument fills the \table{name} placeholder with the table
-// kind whose id is kind_id (see tableKinds() in tablekinds.cpp).
+// kind whose id is kind_id (see tableKinds() in tablekinds.cpp). A
+// "~name=choice" argument picks a \variant{name|...}: `choice` may be a 1-based
+// option index or the option text verbatim. Variant names with spaces need
+// quoting, e.g. "~обращение к клиенту=1".
 int renderHeadless(int argc, char** argv) {
     if (argc < 4) {
         std::fprintf(stderr,
                      "Usage: %s --render <in.docx> <out.docx> "
-                     "[NAME=VALUE ...] [+TABLE=kind_id ...]\n",
+                     "[NAME=VALUE ...] [~VARIANT=choice ...] "
+                     "[+TABLE=kind_id ...]\n",
                      argv[0]);
         return 1;
     }
@@ -1032,7 +1222,16 @@ int renderHeadless(int argc, char** argv) {
     }
     std::vector<docxform::TableKind> kinds = docxform::tableKinds();
     std::map<std::string, std::string> values;
+    std::map<std::string, std::string> variantChoices;
     std::map<std::string, docxform::TableData> tableData;
+
+    // Variant options (name -> options), to resolve a numeric "~name=index".
+    std::map<std::string, std::vector<std::string>> variantOptions;
+    for (const auto& blk : collectFormBlocks(xml))
+        for (const auto& f : blk.fields)
+            if (f.kind == FieldKind::Variant)
+                variantOptions.emplace(f.name, f.options);
+
     for (int i = 4; i < argc; ++i) {
         std::string a = argv[i];
         size_t eq = a.find('=');
@@ -1045,7 +1244,20 @@ int renderHeadless(int argc, char** argv) {
                     tableData[name] = k.build(name);
                     break;
                 }
-        } else {
+        } else if (!a.empty() && a[0] == '~') {  // variant: ~name=index|text
+            std::string name = a.substr(1, eq - 1);
+            std::string val = a.substr(eq + 1);
+            std::string chosen = val;  // default: treat as literal option text
+            auto it = variantOptions.find(name);
+            if (it != variantOptions.end() && !val.empty() &&
+                val.find_first_not_of("0123456789") == std::string::npos) {
+                size_t idx = 0;
+                for (char c : val) idx = idx * 10 + static_cast<size_t>(c - '0');
+                if (idx >= 1 && idx <= it->second.size())
+                    chosen = it->second[idx - 1];
+            }
+            variantChoices[name] = chosen;
+        } else {  // variable: name=value
             values[a.substr(0, eq)] = a.substr(eq + 1);
         }
     }
@@ -1054,7 +1266,8 @@ int renderHeadless(int argc, char** argv) {
         std::fprintf(stderr, "Error: cannot parse '%s'\n", argv[2]);
         return 1;
     }
-    std::string newXml = transformDocument(xml, values, tableData);
+    std::string newXml =
+        transformDocument(xml, values, variantChoices, tableData);
     for (auto& m : members)
         if (m.first == "word/document.xml") m.second = newXml;
     std::string bytes = buildZipStored(members);
