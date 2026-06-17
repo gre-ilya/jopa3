@@ -1274,6 +1274,25 @@ QWidget* openTemplateForm(const QString& templatePath, QString* error,
     return w;
 }
 
+QWidget* showTemplateForm(QWidget* parent) {
+    QString path = QFileDialog::getOpenFileName(
+        parent, QString::fromUtf8("Выберите шаблон .docx"), QString(),
+        QString::fromUtf8("Документ Word (*.docx)"));
+    if (path.isEmpty()) return nullptr;  // user cancelled the chooser
+
+    QString err;
+    QWidget* w = openTemplateForm(path, &err, parent);
+    if (!w) {
+        QMessageBox::critical(parent, QString::fromUtf8("Ошибка"), err);
+        return nullptr;
+    }
+    w->setAttribute(Qt::WA_DeleteOnClose);  // tie lifetime to the window
+    w->show();
+    w->raise();
+    w->activateWindow();
+    return w;
+}
+
 }  // namespace docxform
 
 // Headless: list every fillable item in DOCUMENT ORDER, one per line. Useful
@@ -1417,23 +1436,21 @@ int main(int argc, char** argv) {
 
     QApplication app(argc, argv);
 
-    QString path;
-    if (argc >= 2)
-        path = QString::fromLocal8Bit(argv[1]);
-    else
-        path = QFileDialog::getOpenFileName(
-            nullptr, QString::fromUtf8("Выберите шаблон .docx"), QString(),
-            QString::fromUtf8("Документ Word (*.docx)"));
-    if (path.isEmpty()) return 0;
-
-    QString err;
-    QWidget* w = docxform::openTemplateForm(path, &err);
-    if (!w) {
-        QMessageBox::critical(nullptr, QString::fromUtf8("Ошибка"), err);
-        return 1;
+    if (argc >= 2) {
+        // A template path was given on the command line: open it directly.
+        QString err;
+        QWidget* w =
+            docxform::openTemplateForm(QString::fromLocal8Bit(argv[1]), &err);
+        if (!w) {
+            QMessageBox::critical(nullptr, QString::fromUtf8("Ошибка"), err);
+            return 1;
+        }
+        w->setAttribute(Qt::WA_DeleteOnClose);
+        w->show();
+    } else {
+        // No file given: the same interactive flow exposed to embedders.
+        if (!docxform::showTemplateForm()) return 0;  // cancelled or failed
     }
-    w->setAttribute(Qt::WA_DeleteOnClose);
-    w->show();
     return app.exec();
 }
 #endif  // DOCXFORM_NO_MAIN
