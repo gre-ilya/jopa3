@@ -55,6 +55,7 @@
 #include <zlib.h>
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -644,7 +645,8 @@ std::string concatParagraphText(const std::string& inner) {
 std::string transformParagraph(
     const std::string& inner,
     const std::map<std::string, std::string>& values,
-    const std::map<std::string, std::string>& variantChoices) {
+    const std::map<std::string, std::string>& variantChoices,
+    bool highlight) {
     struct Tok {
         bool simple;
         std::string raw;   // verbatim XML (non-simple content)
@@ -760,7 +762,7 @@ std::string transformParagraph(
         while (x < g + len) {
             if (beginAt[x] >= 0) {  // a placeholder starts here -> value run
                 const M& m = ms[beginAt[x]];
-                out += emitRun(t.rpr, m.repl, m.hl);
+                out += emitRun(t.rpr, m.repl, m.hl && highlight);
                 x = m.e;  // skip the whole match (may extend past this run)
                 continue;
             }
@@ -784,11 +786,14 @@ std::string transformParagraph(
 //   - otherwise substitute its \var{...} variables as usual.
 // `tables` maps a placeholder name to the table content chosen for it;
 // `variantChoices` maps a \variant{...} name to its chosen option text.
+// When `highlight` is true the substituted values are highlighted yellow (as
+// before); when false they are inserted without any highlight.
 std::string transformDocument(
     const std::string& xml,
     const std::map<std::string, std::string>& values,
     const std::map<std::string, std::string>& variantChoices,
-    const std::map<std::string, docxform::TableData>& tables) {
+    const std::map<std::string, docxform::TableData>& tables,
+    bool highlight) {
     std::string out;
     size_t i = 0, copyFrom = 0;
     int tableDepth = 0;
@@ -844,7 +849,7 @@ std::string transformDocument(
             }
 
             out += xml.substr(copyFrom, e + 1 - copyFrom);  // up to <w:p ...>
-            out += transformParagraph(inner, values, variantChoices);
+            out += transformParagraph(inner, values, variantChoices, highlight);
             copyFrom = close;
             i = close;
             continue;
@@ -1063,6 +1068,14 @@ public:
         scroll->setWidget(container);
         root->addWidget(scroll, 1);
 
+        // Toggle for highlighting inserted values yellow in the output. On by
+        // default (the previous, unconditional behaviour); unchecking it inserts
+        // the values without any highlight.
+        highlightCheck_ = new QCheckBox(
+            QString::fromUtf8("Выделять вставленный текст жёлтым"), this);
+        highlightCheck_->setChecked(true);
+        root->addWidget(highlightCheck_);
+
         auto* generate =
             new QPushButton(QString::fromUtf8("Создать документ…"), this);
         generate->setDefault(true);
@@ -1192,8 +1205,9 @@ private:
                 QString::fromUtf8("Не удалось разобрать исходный .docx."));
             return;
         }
-        std::string newXml =
-            transformDocument(xml_, values, variantChoices, tableData);
+        std::string newXml = transformDocument(
+            xml_, values, variantChoices, tableData,
+            highlightCheck_->isChecked());
         for (auto& m : members)
             if (m.first == "word/document.xml") m.second = newXml;
 
@@ -1225,6 +1239,7 @@ private:
     std::string xml_;
     std::vector<FormBlock> blocks_;  // fillable items in document order
     std::vector<docxform::TableKind> kinds_;
+    QCheckBox* highlightCheck_ = nullptr;  // highlight inserted text yellow?
     std::vector<std::pair<std::string, QLineEdit*>> edits_;        // \var{...}
     std::vector<VariantCtl> variantCtls_;                          // \variant{}
     std::vector<std::pair<std::string, QComboBox*>> tableCombos_;  // \table{}
@@ -1300,18 +1315,19 @@ int listVars(int argc, char** argv) {
 
 // Headless mode (no GUI), handy for scripting and testing:
 //   docxform --render <in.docx> <out.docx>
-//       NAME=VALUE ... [~VARIANT=choice ...] [+TABLE=kind_id ...]
+//       NAME=VALUE ... [~VARIANT=choice ...] [+TABLE=kind_id ...] [--no-highlight]
 // A "+name=kind_id" argument fills the \table{name} placeholder with the table
 // kind whose id is kind_id (see tableKinds() in tablekinds.cpp). A
 // "~name=choice" argument picks a \variant{name|...}: `choice` may be a 1-based
 // option index or the option text verbatim. Variant names with spaces need
-// quoting, e.g. "~обращение к клиенту=1".
+// quoting, e.g. "~обращение к клиенту=1". By default inserted values are
+// highlighted yellow; pass --no-highlight to insert them without any highlight.
 int renderHeadless(int argc, char** argv) {
     if (argc < 4) {
         std::fprintf(stderr,
                      "Usage: %s --render <in.docx> <out.docx> "
                      "[NAME=VALUE ...] [~VARIANT=choice ...] "
-                     "[+TABLE=kind_id ...]\n",
+                     "[+TABLE=kind_id ...] [--no-highlight]\n",
                      argv[0]);
         return 1;
     }
@@ -1337,8 +1353,13 @@ int renderHeadless(int argc, char** argv) {
             if (f.kind == FieldKind::Variant)
                 variantOptions.emplace(f.name, f.options);
 
+    bool highlight = true;  // default: highlight inserted values yellow
     for (int i = 4; i < argc; ++i) {
         std::string a = argv[i];
+        if (a == "--no-highlight") {  // insert values without yellow highlight
+            highlight = false;
+            continue;
+        }
         size_t eq = a.find('=');
         if (eq == std::string::npos) continue;
         if (!a.empty() && a[0] == '+') {  // table selection: +name=kind_id
@@ -1372,7 +1393,7 @@ int renderHeadless(int argc, char** argv) {
         return 1;
     }
     std::string newXml =
-        transformDocument(xml, values, variantChoices, tableData);
+        transformDocument(xml, values, variantChoices, tableData, highlight);
     for (auto& m : members)
         if (m.first == "word/document.xml") m.second = newXml;
     std::string bytes = buildZipStored(members);
