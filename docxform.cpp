@@ -872,6 +872,39 @@ struct FormBlock {
     std::vector<FormField> fields;
 };
 
+// For each \var name, the FIRST non-empty `info` seen anywhere in the document
+// (in document order). Variables are deduplicated to one field, so a hint
+// written on ANY occurrence (e.g. \var{DoxNum|Номер документа}) should apply to
+// that field even when the variable's first occurrence was a bare \var{DoxNum}
+// with no hint.
+std::map<std::string, std::string> firstVarInfos(const std::string& xml) {
+    std::map<std::string, std::string> infos;
+    size_t i = 0;
+    while ((i = xml.find('<', i)) != std::string::npos) {
+        if (i + 1 < xml.size() && xml[i + 1] != '/' && tagIs(xml, i, "p")) {
+            size_t e = xml.find('>', i);
+            if (e == std::string::npos) break;
+            if (xml[e - 1] == '/') { i = e + 1; continue; }
+            size_t close = findClose(xml, e + 1, "p");
+            if (close == std::string::npos) break;
+            std::string P = concatParagraphText(xml.substr(e + 1, close - e - 1));
+            Token tok;
+            size_t pos = 0;
+            while (nextAnyToken(P, pos, tok)) {
+                if (tok.kind == FieldKind::Var && !tok.info.empty())
+                    infos.emplace(tok.name, tok.info);  // keeps the first only
+                pos = tok.end;
+            }
+            i = close;
+            continue;
+        }
+        size_t e = xml.find('>', i);
+        if (e == std::string::npos) break;
+        i = e + 1;
+    }
+    return infos;
+}
+
 // Walk the document paragraph by paragraph and collect fillable items in the
 // exact order they appear (variables, variants and tables interleaved). Each
 // item is listed once, under the paragraph of its first occurrence; paragraphs
@@ -879,6 +912,10 @@ struct FormBlock {
 // layout and the headless listing, so they always mirror the document.
 std::vector<FormBlock> collectFormBlocks(const std::string& xml) {
     std::vector<FormBlock> blocks;
+    // A \var hint may be written on any occurrence of the name; resolve each
+    // name's hint up front so the (deduplicated) field gets it regardless of
+    // which occurrence comes first.
+    std::map<std::string, std::string> varInfos = firstVarInfos(xml);
     std::set<std::string> seenVar, seenVariant, seenTable;
     size_t i = 0;
     while ((i = xml.find('<', i)) != std::string::npos) {
@@ -900,8 +937,14 @@ std::vector<FormBlock> collectFormBlocks(const std::string& xml) {
                     isNew = seenVariant.insert(tok.name).second;
                 else
                     isNew = seenTable.insert(tok.name).second;
-                if (isNew)
-                    fields.push_back({tok.kind, tok.name, tok.info, tok.options});
+                if (isNew) {
+                    std::string info;
+                    if (tok.kind == FieldKind::Var) {
+                        auto it = varInfos.find(tok.name);
+                        if (it != varInfos.end()) info = it->second;
+                    }
+                    fields.push_back({tok.kind, tok.name, info, tok.options});
+                }
                 pos = tok.end;
             }
             if (!fields.empty())
