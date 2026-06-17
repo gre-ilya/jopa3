@@ -6,10 +6,10 @@
 //      Two forms are accepted:
 //        \var{value}        - a variable called `value`; the field gets the
 //                             default tooltip.
-//        \var{info, value}  - same variable `value`, but `info` (free-form text
-//                             before the last comma) becomes the field's tooltip
+//        \var{info|value}   - same variable `value`, but `info` (free-form text
+//                             before the last '|') becomes the field's tooltip
 //                             instead of the default one.
-//      e.g. "Dear \var{client_name}, your order \var{order id, order_id} is
+//      e.g. "Dear \var{client_name}, your order \var{order id|order_id} is
 //      \var{status}."
 //   2. docxform opens the .docx, finds every \var{...}, and shows a window with
 //      one text field per variable (the field label is the variable name).
@@ -441,15 +441,15 @@ std::string trimAscii(const std::string& s) {
 
 // Find the next \var{...} variable at or after `from`. Two forms are accepted:
 //   \var{value}        -> name = value, info = ""    (default tooltip)
-//   \var{info, value}  -> name = value, info = info  (custom tooltip text)
+//   \var{info|value}   -> name = value, info = info  (custom tooltip text)
 // `value` is the variable identifier [A-Za-z0-9_]+ (surrounding ASCII spaces
 // trimmed); it doubles as the field label and the substitution key. `info`, when
-// present, is everything before the LAST comma inside the braces, trimmed of
+// present, is everything before the LAST '|' inside the braces, trimmed of
 // ASCII whitespace — so it may itself contain spaces, commas, punctuation and
-// non-ASCII text (e.g. Russian). On success sets begin/end (byte range of the
-// whole \var{...}), name and info; a malformed \var{...} (empty/invalid value)
-// is skipped. Note: "\var{" is not a prefix of "\variant{", so the two never
-// collide.
+// non-ASCII text (e.g. Russian). The '|' separator mirrors \variant{...}. On
+// success sets begin/end (byte range of the whole \var{...}), name and info; a
+// malformed \var{...} (empty/invalid value) is skipped. Note: "\var{" is not a
+// prefix of "\variant{", so the two never collide.
 bool nextVarPlaceholder(const std::string& s, size_t from, size_t& begin,
                         size_t& end, std::string& name, std::string& info) {
     static const std::string kMarker = "\\var{";
@@ -460,15 +460,15 @@ bool nextVarPlaceholder(const std::string& s, size_t from, size_t& begin,
         std::string inner =
             s.substr(p + kMarker.size(), close - (p + kMarker.size()));
 
-        // Split off the value (after the last comma) from the optional info
-        // (everything before it). With no comma the whole thing is the value.
+        // Split off the value (after the last '|') from the optional info
+        // (everything before it). With no '|' the whole thing is the value.
         std::string infoPart, valuePart;
-        size_t comma = inner.rfind(',');
-        if (comma == std::string::npos) {
+        size_t bar = inner.rfind('|');
+        if (bar == std::string::npos) {
             valuePart = inner;
         } else {
-            infoPart = inner.substr(0, comma);
-            valuePart = inner.substr(comma + 1);
+            infoPart = inner.substr(0, bar);
+            valuePart = inner.substr(bar + 1);
         }
 
         std::string nm = trimAscii(valuePart);
@@ -1074,7 +1074,7 @@ private:
     }
 
     // Full guidance for one variable — used as the field's tooltip. When the
-    // \var{...} carried an `info` part (\var{info, value}), that text REPLACES
+    // \var{...} carried an `info` part (\var{info|value}), that text REPLACES
     // the default tooltip, exactly as authored. Otherwise the default guidance
     // is shown. Wrapped in <span> so Qt always renders it as rich text (and
     // escaped entities display correctly).
