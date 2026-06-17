@@ -822,8 +822,11 @@ std::string transformDocument(
                 while (nextTablePlaceholder(P, pos, b, en, name)) {
                     auto it = tables.find(name);
                     if (it != tables.end()) {
+                        // Two <w:tbl> in a row must be separated by a paragraph
+                        // (OOXML would otherwise merge them), but no trailing
+                        // paragraph is added after the (last) table.
+                        if (!tablesXml.empty()) tablesXml += "<w:p/>";
                         tablesXml += docxform::buildTableXml(it->second);
-                        tablesXml += "<w:p/>";  // keep a paragraph after a table
                     }
                     pos = en;
                 }
