@@ -44,18 +44,24 @@ struct TableKind {
 // function (in tablekinds.cpp) to add, remove or change kinds.
 std::vector<TableKind> tableKinds();
 
-// A "fixed" table tag: a bare placeholder (no braces, e.g. "\\tablewage") that
-// is ALWAYS replaced by one specific table kind, with no drop-down in the GUI
-// and no argument in headless mode. Use it for tables that always look the same
-// in your documents.
+// A "fixed" table tag: a bare placeholder (no braces, e.g. "\\tablewage") bound
+// DIRECTLY to its own logic. Wherever the tag appears it is always replaced by
+// whatever its `build` returns — no drop-down in the GUI, no argument in
+// headless mode. Use it to run specific logic for a specific tag.
 struct FixedTable {
-    std::string tag;     // the literal placeholder in the document, e.g. "\\tablewage"
-    std::string kindId;  // id of the TableKind (see tableKinds()) to always use
+    std::string tag;  // the literal placeholder in the document, e.g. "\\tablewage"
+
+    // The logic that produces THIS tag's table. Called at generation time with
+    // the tag itself (so one function can serve several tags if you want).
+    // Return the table content: keep `headers` fixed and compute `rows` however
+    // you like. You can reuse a builder from tableKinds() or write a function
+    // dedicated to this one tag.
+    std::function<TableData(const std::string& tag)> build;
 };
 
-// THE FIXED-TAG REGISTRY. Returns every fixed tag and the table kind it always
-// maps to. Edit the body of this function (in tablekinds.cpp) to add your own,
-// e.g. map "\\tableprice" to the "price" kind. Tags must start with '\\', be
+// THE FIXED-TAG REGISTRY. Returns every fixed tag and the builder it always runs.
+// Edit the body of this function (in tablekinds.cpp) to add your own, e.g. bind
+// "\\tablewage" to your own buildWage() function. Tags must start with '\\', be
 // distinct, and not be a prefix of one another or of "\\table{".
 std::vector<FixedTable> fixedTables();
 

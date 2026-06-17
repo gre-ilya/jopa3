@@ -122,6 +122,20 @@ TableData runtimeTable(const std::string& name) {
     return t;
 }
 
+// 6) Logic dedicated to ONE specific tag (\tablewage). A fixed tag is bound
+//    straight to a function like this, so you run exactly the code you want for
+//    that tag. Compute the rows however you like (here: a tiny hard-coded
+//    example; in your app pull them from your data, a file, a DB, etc.).
+TableData wageReport(const std::string& /*tag*/) {
+    TableData t;
+    t.headers = {"Сотрудник", "Оклад, руб."};  // fixed columns
+    t.rows = {
+        {"Иванов И. И.", "100000"},
+        {"Петров П. П.", "90000"},
+    };
+    return t;
+}
+
 }  // namespace
 
 // ---- The registry ---------------------------------------------------------
@@ -154,9 +168,9 @@ std::map<std::string, std::vector<std::vector<std::string>>>& tableContext() {
 //      Word, including the leading backslash, e.g. "\\tablewage".
 std::vector<FixedTable> fixedTables() {
     std::vector<FixedTable> fixed;
-    fixed.push_back({"\\tableprice",   "price"});      // \tableprice   -> price kind
-    fixed.push_back({"\\tablewage",    "employees"});  // \tablewage    -> employees kind
-    fixed.push_back({"\\tableruntime", "runtime"});    // \tableruntime -> runtime rows
+    fixed.push_back({"\\tableprice",   priceList});     // reuse an existing builder
+    fixed.push_back({"\\tablewage",    wageReport});    // logic dedicated to this tag
+    fixed.push_back({"\\tableruntime", runtimeTable});  // rows from tableContext()
     return fixed;
 }
 

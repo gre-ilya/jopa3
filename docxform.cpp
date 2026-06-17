@@ -817,17 +817,12 @@ std::string transformParagraph(
 }
 
 // Build every registered fixed-tag table into `out`, keyed by its tag (so e.g.
-// out["\\tablewage"] holds the content for \tablewage). Both the GUI and the
-// headless path call this, so fixed tables are always inserted automatically,
-// with no user input.
+// out["\\tablewage"] holds the content for \tablewage) by running each tag's own
+// builder. Both the GUI and the headless path call this, so fixed tables are
+// always inserted automatically, with no user input.
 void addFixedTables(std::map<std::string, docxform::TableData>& out) {
-    std::vector<docxform::TableKind> kinds = docxform::tableKinds();
     for (const docxform::FixedTable& ft : docxform::fixedTables())
-        for (const docxform::TableKind& k : kinds)
-            if (k.id == ft.kindId && k.build) {
-                out[ft.tag] = k.build(ft.tag);
-                break;
-            }
+        if (ft.build) out[ft.tag] = ft.build(ft.tag);
 }
 
 // Walk document.xml and, for every <w:p>:
@@ -1039,14 +1034,10 @@ std::vector<FormBlock> collectFormBlocks(const std::string& xml) {
 }
 
 // Collect the fixed-tag tables (\tablewage, ...) actually present in the
-// document, in first-seen order, as (tag, kindId). Used by --vars so you can
-// confirm a tag is recognised. These need no user input — see addFixedTables.
-std::vector<std::pair<std::string, std::string>> collectFixedTables(
-    const std::string& xml) {
-    std::map<std::string, std::string> tagKind;
-    for (const docxform::FixedTable& ft : docxform::fixedTables())
-        tagKind[ft.tag] = ft.kindId;
-    std::vector<std::pair<std::string, std::string>> out;
+// document, in first-seen order. Used by --vars so you can confirm a tag is
+// recognised. These need no user input — see addFixedTables.
+std::vector<std::string> collectFixedTables(const std::string& xml) {
+    std::vector<std::string> out;
     std::set<std::string> seen;
     size_t i = 0;
     while ((i = xml.find('<', i)) != std::string::npos) {
@@ -1060,8 +1051,7 @@ std::vector<std::pair<std::string, std::string>> collectFixedTables(
             size_t pos = 0, b, en;
             std::string tag;
             while (nextFixedTable(P, pos, b, en, tag)) {
-                if (seen.insert(tag).second)
-                    out.emplace_back(tag, tagKind[tag]);
+                if (seen.insert(tag).second) out.push_back(tag);
                 pos = en;
             }
             i = close;
@@ -1411,7 +1401,7 @@ QWidget* showTemplateForm(QWidget* parent) {
 //   VAR\t<name>\t<paragraph context>
 //   VARIANT\t<name>\t<opt1>|<opt2>|...
 //   TABLE\t<name>
-//   FIXEDTABLE\t<tag>\t<kind id>     (always-inserted fixed tag, e.g. \tablewage)
+//   FIXEDTABLE\t<tag>               (always-inserted fixed tag, e.g. \tablewage)
 int listVars(int argc, char** argv) {
     if (argc < 3) {
         std::fprintf(stderr, "Usage: %s --vars <in.docx>\n", argv[0]);
@@ -1440,8 +1430,8 @@ int listVars(int argc, char** argv) {
         }
     }
     // Fixed-tag tables present in the document (always auto-inserted).
-    for (const auto& ft : collectFixedTables(xml))
-        std::printf("FIXEDTABLE\t%s\t%s\n", ft.first.c_str(), ft.second.c_str());
+    for (const auto& tag : collectFixedTables(xml))
+        std::printf("FIXEDTABLE\t%s\n", tag.c_str());
     return 0;
 }
 
