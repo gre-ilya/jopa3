@@ -2,12 +2,19 @@
 //
 // Workflow:
 //   1. In Word/Google Docs/LibreOffice you write a document and mark the parts
-//      that should change as {{placeholders}} named in plain ASCII, e.g.
-//      "Dear {{client_name}}, your order {{order_id}} is {{status}}."
-//   2. docxform opens the .docx, finds every {{name}}, and shows a window with
+//      that should change with \var{...} placeholders named in plain ASCII.
+//      Two forms are accepted:
+//        \var{value}        - a variable called `value`; the field gets the
+//                             default tooltip.
+//        \var{info, value}  - same variable `value`, but `info` (free-form text
+//                             before the last comma) becomes the field's tooltip
+//                             instead of the default one.
+//      e.g. "Dear \var{client_name}, your order \var{order id, order_id} is
+//      \var{status}."
+//   2. docxform opens the .docx, finds every \var{...}, and shows a window with
 //      one text field per variable (the field label is the variable name).
 //   3. You type the values and press "Создать документ…".
-//   4. docxform writes a new .docx where each {{name}} is replaced by the value
+//   4. docxform writes a new .docx where each \var{...} is replaced by the value
 //      you entered, and every substituted value is highlighted yellow.
 //
 // Placeholders split by the editor across several runs (a very common thing in
@@ -424,28 +431,61 @@ bool isComplexRun(const std::string& run, bool& hasText) {
 
 // ---- Placeholder scanning -------------------------------------------------
 
-// Find the next {{ name }} at or after `from`. name = [A-Za-z0-9_]+ with
-// optional surrounding spaces/tabs. On success sets begin/end (byte range of
-// the whole {{...}}) and name.
-bool nextPlaceholder(const std::string& s, size_t from, size_t& begin,
-                     size_t& end, std::string& name) {
+// Trim leading/trailing ASCII whitespace from a string (in place by value).
+std::string trimAscii(const std::string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+    return s.substr(a, b - a);
+}
+
+// Find the next \var{...} variable at or after `from`. Two forms are accepted:
+//   \var{value}        -> name = value, info = ""    (default tooltip)
+//   \var{info, value}  -> name = value, info = info  (custom tooltip text)
+// `value` is the variable identifier [A-Za-z0-9_]+ (surrounding ASCII spaces
+// trimmed); it doubles as the field label and the substitution key. `info`, when
+// present, is everything before the LAST comma inside the braces, trimmed of
+// ASCII whitespace — so it may itself contain spaces, commas, punctuation and
+// non-ASCII text (e.g. Russian). On success sets begin/end (byte range of the
+// whole \var{...}), name and info; a malformed \var{...} (empty/invalid value)
+// is skipped. Note: "\var{" is not a prefix of "\variant{", so the two never
+// collide.
+bool nextVarPlaceholder(const std::string& s, size_t from, size_t& begin,
+                        size_t& end, std::string& name, std::string& info) {
+    static const std::string kMarker = "\\var{";
     size_t p = from;
-    while ((p = s.find("{{", p)) != std::string::npos) {
-        size_t i = p + 2;
-        while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
-        size_t ns = i;
-        while (i < s.size() &&
-               (std::isalnum(static_cast<unsigned char>(s[i])) || s[i] == '_'))
-            ++i;
-        size_t ne = i;
-        while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
-        if (ne > ns && s.compare(i, 2, "}}") == 0) {
+    while ((p = s.find(kMarker, p)) != std::string::npos) {
+        size_t close = s.find('}', p + kMarker.size());
+        if (close == std::string::npos) return false;
+        std::string inner =
+            s.substr(p + kMarker.size(), close - (p + kMarker.size()));
+
+        // Split off the value (after the last comma) from the optional info
+        // (everything before it). With no comma the whole thing is the value.
+        std::string infoPart, valuePart;
+        size_t comma = inner.rfind(',');
+        if (comma == std::string::npos) {
+            valuePart = inner;
+        } else {
+            infoPart = inner.substr(0, comma);
+            valuePart = inner.substr(comma + 1);
+        }
+
+        std::string nm = trimAscii(valuePart);
+        bool validName = !nm.empty();
+        for (char c : nm)
+            if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) {
+                validName = false;
+                break;
+            }
+        if (validName) {
             begin = p;
-            end = i + 2;
-            name = s.substr(ns, ne - ns);
+            end = close + 1;
+            name = nm;
+            info = trimAscii(infoPart);
             return true;
         }
-        p += 2;  // "{{" without a valid name/closing; keep scanning
+        p = close + 1;  // not a valid \var{...}; keep scanning
     }
     return false;
 }
@@ -530,10 +570,11 @@ struct Token {
     size_t begin = 0;
     size_t end = 0;
     std::string name;
+    std::string info;                  // Var only: custom tooltip ("" if none)
     std::vector<std::string> options;  // Variant only
 };
 
-// Find the earliest of {{var}}, \variant{...} or \table{name} at or after
+// Find the earliest of \var{...}, \variant{...} or \table{name} at or after
 // `from`. The three syntaxes never overlap, so picking the smallest begin is
 // unambiguous. Returns false when no token remains.
 bool nextAnyToken(const std::string& s, size_t from, Token& tok) {
@@ -542,21 +583,24 @@ bool nextAnyToken(const std::string& s, size_t from, Token& tok) {
     size_t b, e;
     std::string nm;
 
-    if (nextPlaceholder(s, from, b, e, nm) && b < best) {
-        best = b;
-        chosen = {FieldKind::Var, b, e, nm, {}};
+    {
+        std::string inf;
+        if (nextVarPlaceholder(s, from, b, e, nm, inf) && b < best) {
+            best = b;
+            chosen = {FieldKind::Var, b, e, nm, std::move(inf), {}};
+        }
     }
     {
         std::vector<std::string> opts;
         std::string vn;
         if (nextVariantPlaceholder(s, from, b, e, vn, opts) && b < best) {
             best = b;
-            chosen = {FieldKind::Variant, b, e, vn, std::move(opts)};
+            chosen = {FieldKind::Variant, b, e, vn, "", std::move(opts)};
         }
     }
     if (nextTablePlaceholder(s, from, b, e, nm) && b < best) {
         best = b;
-        chosen = {FieldKind::Table, b, e, nm, {}};
+        chosen = {FieldKind::Table, b, e, nm, "", {}};
     }
 
     if (best == std::string::npos) return false;
@@ -591,7 +635,7 @@ std::string concatParagraphText(const std::string& inner) {
 
 // ---- Document transformation ----------------------------------------------
 
-// Rebuild one paragraph's inner XML, replacing each {{name}} and each
+// Rebuild one paragraph's inner XML, replacing each \var{...} and each
 // \variant{...} (matched across the paragraph's merged simple-run text) with its
 // value, highlighted yellow. `values` maps a variable name to its text;
 // `variantChoices` maps a variant name to the chosen option text (when a variant
@@ -650,7 +694,7 @@ std::string transformParagraph(
     }
     if (!verb.empty()) toks.push_back({false, std::move(verb), "", "", 0});
 
-    // Resolve every {{var}} / \variant{...} token to its replacement text up
+    // Resolve every \var{...} / \variant{...} token to its replacement text up
     // front. \table{...} tokens are handled at the paragraph level (see
     // transformDocument) and are left untouched here. nextAnyToken yields tokens
     // in increasing position, so `ms` stays sorted by begin.
@@ -662,10 +706,15 @@ std::string transformParagraph(
         while (nextAnyToken(P, pos, tok)) {
             if (tok.kind == FieldKind::Var) {
                 auto it = values.find(tok.name);
-                std::string val = (it != values.end())
-                                      ? it->second
-                                      : ("{{" + tok.name + "}}");
-                ms.push_back({tok.begin, tok.end, std::move(val), true});
+                if (it != values.end()) {
+                    ms.push_back({tok.begin, tok.end, it->second, true});
+                } else {
+                    // Unfilled (e.g. headless without this NAME=): keep the
+                    // original \var{...} literal in place, unhighlighted.
+                    ms.push_back({tok.begin, tok.end,
+                                  P.substr(tok.begin, tok.end - tok.begin),
+                                  false});
+                }
             } else if (tok.kind == FieldKind::Variant) {
                 auto it = variantChoices.find(tok.name);
                 std::string val =
@@ -731,7 +780,7 @@ std::string transformParagraph(
 // Walk document.xml and, for every <w:p>:
 //   - if (at body level) it holds a \table{name} placeholder whose table the
 //     user selected, replace the WHOLE paragraph with the generated <w:tbl>;
-//   - otherwise substitute its {{variables}} as usual.
+//   - otherwise substitute its \var{...} variables as usual.
 // `tables` maps a placeholder name to the table content chosen for it;
 // `variantChoices` maps a \variant{...} name to its chosen option text.
 std::string transformDocument(
@@ -805,11 +854,12 @@ std::string transformDocument(
     return out;
 }
 
-// A fillable item discovered in a template: a {{variable}}, a \variant{...}
+// A fillable item discovered in a template: a \var{...} variable, a \variant{...}
 // choice, or a \table{...} placeholder.
 struct FormField {
     FieldKind kind;
     std::string name;
+    std::string info;                  // Var: custom tooltip text ("" if none)
     std::vector<std::string> options;  // Variant: the available choices
 };
 
@@ -850,7 +900,7 @@ std::vector<FormBlock> collectFormBlocks(const std::string& xml) {
                 else
                     isNew = seenTable.insert(tok.name).second;
                 if (isNew)
-                    fields.push_back({tok.kind, tok.name, tok.options});
+                    fields.push_back({tok.kind, tok.name, tok.info, tok.options});
                 pos = tok.end;
             }
             if (!fields.empty())
@@ -868,7 +918,7 @@ std::vector<FormBlock> collectFormBlocks(const std::string& xml) {
 // ---- GUI ------------------------------------------------------------------
 
 // A QWidget-only window (no Q_OBJECT, so no moc is needed): one control per
-// fillable item — a text field for a {{variable}}, a drop-down for a
+// fillable item — a text field for a \var{...} variable, a drop-down for a
 // \variant{...} and a drop-down for a \table{...} — laid out in document order,
 // plus a button that writes the filled .docx. The widget is self-contained, so
 // it can be embedded in another Qt application as-is.
@@ -931,7 +981,7 @@ public:
                     // clipped); full guidance lives in the tooltip.
                     edit->setPlaceholderText(
                         QString::fromUtf8("значение для %1").arg(qname));
-                    edit->setToolTip(varHintHtml(f.name));
+                    edit->setToolTip(varHintHtml(f.name, f.info));
                     form->addRow(qname, edit);
                     edits_.emplace_back(f.name, edit);
                 } else if (f.kind == FieldKind::Variant) {
@@ -956,7 +1006,7 @@ public:
 
         if (blocks_.empty()) {
             form->addRow(new QLabel(
-                QString::fromUtf8("В документе нет плейсхолдеров {{…}}, "
+                QString::fromUtf8("В документе нет плейсхолдеров \\var{…}, "
                                   "\\variant{…} или \\table{…}."),
                 container));
         }
@@ -1003,7 +1053,8 @@ private:
                 else if (tok.kind == FieldKind::Variant)
                     html += "<span style=\"color:#999;\">" + shown + "</span>";
                 else
-                    html += "<span style=\"color:#999;\">{{" + name + "}}</span>";
+                    html += "<span style=\"color:#999;\">\\var{" + name +
+                            "}</span>";
             }
             cur = tok.end;
             pos = tok.end;
@@ -1022,12 +1073,19 @@ private:
             "плейсхолдер будет удалён из итогового файла.");
     }
 
-    // Full guidance for one variable — used as the field's tooltip.
-    static QString varHintHtml(const std::string& name) {
+    // Full guidance for one variable — used as the field's tooltip. When the
+    // \var{...} carried an `info` part (\var{info, value}), that text REPLACES
+    // the default tooltip, exactly as authored. Otherwise the default guidance
+    // is shown. Wrapped in <span> so Qt always renders it as rich text (and
+    // escaped entities display correctly).
+    static QString varHintHtml(const std::string& name, const std::string& info) {
+        if (!info.empty())
+            return QString::fromUtf8("<span>%1</span>")
+                .arg(QString::fromStdString(info).toHtmlEscaped());
         QString qname = QString::fromStdString(name).toHtmlEscaped();
         return QString::fromUtf8(
                    "<b>%1</b> — введите значение для переменной "
-                   "<code>{{%1}}</code>. %2")
+                   "<code>\\var{%1}</code>. %2")
             .arg(qname, fillingRules());
     }
 
@@ -1120,7 +1178,7 @@ private:
     std::string xml_;
     std::vector<FormBlock> blocks_;  // fillable items in document order
     std::vector<docxform::TableKind> kinds_;
-    std::vector<std::pair<std::string, QLineEdit*>> edits_;        // {{var}}
+    std::vector<std::pair<std::string, QLineEdit*>> edits_;        // \var{...}
     std::vector<VariantCtl> variantCtls_;                          // \variant{}
     std::vector<std::pair<std::string, QComboBox*>> tableCombos_;  // \table{}
 };
