@@ -20,7 +20,7 @@
 //     for every \table{...} placeholder.
 //
 //  Cells are plain text (UTF-8). Newlines inside a cell are kept as separate
-//  lines. Borders and a bold, shaded header row are added automatically by
+//  lines. Borders and a bold header row are added automatically by
 //  buildTableXml(), so builders only deal with content.
 // =====================================================================
 
@@ -128,12 +128,23 @@ std::string buildTableXml(const TableData& table) {
     for (const auto& r : table.rows) cols = std::max(cols, r.size());
     if (cols == 0) cols = 1;
 
+    // Equal column widths, independent of content: the table spans a fixed total
+    // width (~full text area of a default page) split evenly between the columns.
+    // Combined with a fixed table layout below, Word keeps every column the same
+    // width regardless of what each cell contains.
+    const int kTotalDxa = 9360;  // ~6.5" in twips; close to a default page's text width
+    int colDxa = static_cast<int>(kTotalDxa / cols);
+    if (colDxa < 1) colDxa = 1;
+    const int tableDxa = colDxa * static_cast<int>(cols);
+    const std::string colW = std::to_string(colDxa);
+
     auto cell = [&](const std::string& text, bool header) {
         std::string rpr = header ? "<w:rPr><w:b/></w:rPr>" : "";
+        // Header cells are bold but keep the same white background as the rest
+        // of the table (no <w:shd> fill). Every cell gets the same preferred
+        // width so all columns come out equal.
         std::string tcpr =
-            header ? "<w:tcPr><w:shd w:val=\"clear\" w:color=\"auto\" "
-                     "w:fill=\"D9D9D9\"/></w:tcPr>"
-                   : "";
+            "<w:tcPr><w:tcW w:w=\"" + colW + "\" w:type=\"dxa\"/></w:tcPr>";
         // Split the cell text on newlines into separate paragraphs.
         std::string body;
         size_t start = 0;
@@ -158,16 +169,19 @@ std::string buildTableXml(const TableData& table) {
     };
 
     std::string x = "<w:tbl><w:tblPr>";
-    x += "<w:tblW w:w=\"0\" w:type=\"auto\"/>";
+    x += "<w:tblW w:w=\"" + std::to_string(tableDxa) + "\" w:type=\"dxa\"/>";
     x += "<w:tblBorders>";
     for (const char* side :
          {"top", "left", "bottom", "right", "insideH", "insideV"})
         x += std::string("<w:") + side +
              " w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/>";
-    x += "</w:tblBorders></w:tblPr>";
+    x += "</w:tblBorders>";
+    x += "<w:tblLayout w:type=\"fixed\"/>";  // honour the column widths exactly
+    x += "</w:tblPr>";
 
     x += "<w:tblGrid>";
-    for (size_t c = 0; c < cols; ++c) x += "<w:gridCol/>";
+    for (size_t c = 0; c < cols; ++c)
+        x += "<w:gridCol w:w=\"" + colW + "\"/>";
     x += "</w:tblGrid>";
 
     if (!table.headers.empty()) x += row(table.headers, true);

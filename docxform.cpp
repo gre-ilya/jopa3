@@ -4,13 +4,13 @@
 //   1. In Word/Google Docs/LibreOffice you write a document and mark the parts
 //      that should change with \var{...} placeholders named in plain ASCII.
 //      Two forms are accepted:
-//        \var{value}        - a variable called `value`; the field gets the
-//                             default tooltip.
-//        \var{info|value}   - same variable `value`, but `info` (free-form text
-//                             before the last '|') becomes the field's tooltip
-//                             instead of the default one.
-//      e.g. "Dear \var{client_name}, your order \var{order id|order_id} is
-//      \var{status}."
+//        \var{name}        - a variable called `name`; the field gets the
+//                            default tooltip.
+//        \var{name|info}   - same variable `name`, but `info` (free-form text
+//                            after the first '|') becomes the field's tooltip
+//                            instead of the default one.
+//      e.g. "Dear \var{client_name}, your order \var{order_id|the order number}
+//      is \var{status}."
 //   2. docxform opens the .docx, finds every \var{...}, and shows a window with
 //      one text field per variable (the field label is the variable name).
 //   3. You type the values and press "Создать документ…".
@@ -55,6 +55,7 @@
 #include <zlib.h>
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -440,15 +441,16 @@ std::string trimAscii(const std::string& s) {
 }
 
 // Find the next \var{...} variable at or after `from`. Two forms are accepted:
-//   \var{value}        -> name = value, info = ""    (default tooltip)
-//   \var{info|value}   -> name = value, info = info  (custom tooltip text)
-// `value` is the variable identifier [A-Za-z0-9_]+ (surrounding ASCII spaces
-// trimmed); it doubles as the field label and the substitution key. `info`, when
-// present, is everything before the LAST '|' inside the braces, trimmed of
-// ASCII whitespace — so it may itself contain spaces, commas, punctuation and
+//   \var{name}        -> name = name, info = ""    (default tooltip)
+//   \var{name|info}   -> name = name, info = info  (custom tooltip text)
+// `name` is the variable identifier [A-Za-z0-9_]+ (surrounding ASCII spaces
+// trimmed); it is both the field label and the substitution key — a name filled
+// once is substituted at every occurrence. `info`, when present, is everything
+// after the FIRST '|' inside the braces, trimmed of ASCII whitespace — so it may
+// itself contain '|', commas and other punctuation, as well as spaces and
 // non-ASCII text (e.g. Russian). The '|' separator mirrors \variant{...}. On
 // success sets begin/end (byte range of the whole \var{...}), name and info; a
-// malformed \var{...} (empty/invalid value) is skipped. Note: "\var{" is not a
+// malformed \var{...} (empty/invalid name) is skipped. Note: "\var{" is not a
 // prefix of "\variant{", so the two never collide.
 bool nextVarPlaceholder(const std::string& s, size_t from, size_t& begin,
                         size_t& end, std::string& name, std::string& info) {
@@ -460,18 +462,18 @@ bool nextVarPlaceholder(const std::string& s, size_t from, size_t& begin,
         std::string inner =
             s.substr(p + kMarker.size(), close - (p + kMarker.size()));
 
-        // Split off the value (after the last '|') from the optional info
-        // (everything before it). With no '|' the whole thing is the value.
-        std::string infoPart, valuePart;
-        size_t bar = inner.rfind('|');
+        // Split the name (before the first '|') from the optional info
+        // (everything after it). With no '|' the whole thing is the name.
+        std::string namePart, infoPart;
+        size_t bar = inner.find('|');
         if (bar == std::string::npos) {
-            valuePart = inner;
+            namePart = inner;
         } else {
-            infoPart = inner.substr(0, bar);
-            valuePart = inner.substr(bar + 1);
+            namePart = inner.substr(0, bar);
+            infoPart = inner.substr(bar + 1);
         }
 
-        std::string nm = trimAscii(valuePart);
+        std::string nm = trimAscii(namePart);
         bool validName = !nm.empty();
         for (char c : nm)
             if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) {
@@ -643,7 +645,8 @@ std::string concatParagraphText(const std::string& inner) {
 std::string transformParagraph(
     const std::string& inner,
     const std::map<std::string, std::string>& values,
-    const std::map<std::string, std::string>& variantChoices) {
+    const std::map<std::string, std::string>& variantChoices,
+    bool highlight) {
     struct Tok {
         bool simple;
         std::string raw;   // verbatim XML (non-simple content)
@@ -759,7 +762,7 @@ std::string transformParagraph(
         while (x < g + len) {
             if (beginAt[x] >= 0) {  // a placeholder starts here -> value run
                 const M& m = ms[beginAt[x]];
-                out += emitRun(t.rpr, m.repl, m.hl);
+                out += emitRun(t.rpr, m.repl, m.hl && highlight);
                 x = m.e;  // skip the whole match (may extend past this run)
                 continue;
             }
@@ -783,11 +786,14 @@ std::string transformParagraph(
 //   - otherwise substitute its \var{...} variables as usual.
 // `tables` maps a placeholder name to the table content chosen for it;
 // `variantChoices` maps a \variant{...} name to its chosen option text.
+// When `highlight` is true the substituted values are highlighted yellow (as
+// before); when false they are inserted without any highlight.
 std::string transformDocument(
     const std::string& xml,
     const std::map<std::string, std::string>& values,
     const std::map<std::string, std::string>& variantChoices,
-    const std::map<std::string, docxform::TableData>& tables) {
+    const std::map<std::string, docxform::TableData>& tables,
+    bool highlight) {
     std::string out;
     size_t i = 0, copyFrom = 0;
     int tableDepth = 0;
@@ -821,8 +827,11 @@ std::string transformDocument(
                 while (nextTablePlaceholder(P, pos, b, en, name)) {
                     auto it = tables.find(name);
                     if (it != tables.end()) {
+                        // Two <w:tbl> in a row must be separated by a paragraph
+                        // (OOXML would otherwise merge them), but no trailing
+                        // paragraph is added after the (last) table.
+                        if (!tablesXml.empty()) tablesXml += "<w:p/>";
                         tablesXml += docxform::buildTableXml(it->second);
-                        tablesXml += "<w:p/>";  // keep a paragraph after a table
                     }
                     pos = en;
                 }
@@ -840,7 +849,7 @@ std::string transformDocument(
             }
 
             out += xml.substr(copyFrom, e + 1 - copyFrom);  // up to <w:p ...>
-            out += transformParagraph(inner, values, variantChoices);
+            out += transformParagraph(inner, values, variantChoices, highlight);
             copyFrom = close;
             i = close;
             continue;
@@ -871,6 +880,39 @@ struct FormBlock {
     std::vector<FormField> fields;
 };
 
+// For each \var name, the FIRST non-empty `info` seen anywhere in the document
+// (in document order). Variables are deduplicated to one field, so a hint
+// written on ANY occurrence (e.g. \var{DoxNum|Номер документа}) should apply to
+// that field even when the variable's first occurrence was a bare \var{DoxNum}
+// with no hint.
+std::map<std::string, std::string> firstVarInfos(const std::string& xml) {
+    std::map<std::string, std::string> infos;
+    size_t i = 0;
+    while ((i = xml.find('<', i)) != std::string::npos) {
+        if (i + 1 < xml.size() && xml[i + 1] != '/' && tagIs(xml, i, "p")) {
+            size_t e = xml.find('>', i);
+            if (e == std::string::npos) break;
+            if (xml[e - 1] == '/') { i = e + 1; continue; }
+            size_t close = findClose(xml, e + 1, "p");
+            if (close == std::string::npos) break;
+            std::string P = concatParagraphText(xml.substr(e + 1, close - e - 1));
+            Token tok;
+            size_t pos = 0;
+            while (nextAnyToken(P, pos, tok)) {
+                if (tok.kind == FieldKind::Var && !tok.info.empty())
+                    infos.emplace(tok.name, tok.info);  // keeps the first only
+                pos = tok.end;
+            }
+            i = close;
+            continue;
+        }
+        size_t e = xml.find('>', i);
+        if (e == std::string::npos) break;
+        i = e + 1;
+    }
+    return infos;
+}
+
 // Walk the document paragraph by paragraph and collect fillable items in the
 // exact order they appear (variables, variants and tables interleaved). Each
 // item is listed once, under the paragraph of its first occurrence; paragraphs
@@ -878,6 +920,10 @@ struct FormBlock {
 // layout and the headless listing, so they always mirror the document.
 std::vector<FormBlock> collectFormBlocks(const std::string& xml) {
     std::vector<FormBlock> blocks;
+    // A \var hint may be written on any occurrence of the name; resolve each
+    // name's hint up front so the (deduplicated) field gets it regardless of
+    // which occurrence comes first.
+    std::map<std::string, std::string> varInfos = firstVarInfos(xml);
     std::set<std::string> seenVar, seenVariant, seenTable;
     size_t i = 0;
     while ((i = xml.find('<', i)) != std::string::npos) {
@@ -899,8 +945,14 @@ std::vector<FormBlock> collectFormBlocks(const std::string& xml) {
                     isNew = seenVariant.insert(tok.name).second;
                 else
                     isNew = seenTable.insert(tok.name).second;
-                if (isNew)
-                    fields.push_back({tok.kind, tok.name, tok.info, tok.options});
+                if (isNew) {
+                    std::string info;
+                    if (tok.kind == FieldKind::Var) {
+                        auto it = varInfos.find(tok.name);
+                        if (it != varInfos.end()) info = it->second;
+                    }
+                    fields.push_back({tok.kind, tok.name, info, tok.options});
+                }
                 pos = tok.end;
             }
             if (!fields.empty())
@@ -1016,6 +1068,14 @@ public:
         scroll->setWidget(container);
         root->addWidget(scroll, 1);
 
+        // Toggle for highlighting inserted values yellow in the output. On by
+        // default (the previous, unconditional behaviour); unchecking it inserts
+        // the values without any highlight.
+        highlightCheck_ = new QCheckBox(
+            QString::fromUtf8("Выделять вставленный текст жёлтым"), this);
+        highlightCheck_->setChecked(true);
+        root->addWidget(highlightCheck_);
+
         auto* generate =
             new QPushButton(QString::fromUtf8("Создать документ…"), this);
         generate->setDefault(true);
@@ -1074,7 +1134,7 @@ private:
     }
 
     // Full guidance for one variable — used as the field's tooltip. When the
-    // \var{...} carried an `info` part (\var{info|value}), that text REPLACES
+    // \var{...} carried an `info` part (\var{name|info}), that text REPLACES
     // the default tooltip, exactly as authored. Otherwise the default guidance
     // is shown. Wrapped in <span> so Qt always renders it as rich text (and
     // escaped entities display correctly).
@@ -1145,8 +1205,9 @@ private:
                 QString::fromUtf8("Не удалось разобрать исходный .docx."));
             return;
         }
-        std::string newXml =
-            transformDocument(xml_, values, variantChoices, tableData);
+        std::string newXml = transformDocument(
+            xml_, values, variantChoices, tableData,
+            highlightCheck_->isChecked());
         for (auto& m : members)
             if (m.first == "word/document.xml") m.second = newXml;
 
@@ -1178,6 +1239,7 @@ private:
     std::string xml_;
     std::vector<FormBlock> blocks_;  // fillable items in document order
     std::vector<docxform::TableKind> kinds_;
+    QCheckBox* highlightCheck_ = nullptr;  // highlight inserted text yellow?
     std::vector<std::pair<std::string, QLineEdit*>> edits_;        // \var{...}
     std::vector<VariantCtl> variantCtls_;                          // \variant{}
     std::vector<std::pair<std::string, QComboBox*>> tableCombos_;  // \table{}
@@ -1209,6 +1271,25 @@ QWidget* openTemplateForm(const QString& templatePath, QString* error,
     auto* w = new FormWindow(templatePath, std::move(zip), std::move(xml),
                              std::move(blocks));
     if (parent) w->setParent(parent, w->windowFlags());
+    return w;
+}
+
+QWidget* showTemplateForm(QWidget* parent) {
+    QString path = QFileDialog::getOpenFileName(
+        parent, QString::fromUtf8("Выберите шаблон .docx"), QString(),
+        QString::fromUtf8("Документ Word (*.docx)"));
+    if (path.isEmpty()) return nullptr;  // user cancelled the chooser
+
+    QString err;
+    QWidget* w = openTemplateForm(path, &err, parent);
+    if (!w) {
+        QMessageBox::critical(parent, QString::fromUtf8("Ошибка"), err);
+        return nullptr;
+    }
+    w->setAttribute(Qt::WA_DeleteOnClose);  // tie lifetime to the window
+    w->show();
+    w->raise();
+    w->activateWindow();
     return w;
 }
 
@@ -1253,18 +1334,19 @@ int listVars(int argc, char** argv) {
 
 // Headless mode (no GUI), handy for scripting and testing:
 //   docxform --render <in.docx> <out.docx>
-//       NAME=VALUE ... [~VARIANT=choice ...] [+TABLE=kind_id ...]
+//       NAME=VALUE ... [~VARIANT=choice ...] [+TABLE=kind_id ...] [--no-highlight]
 // A "+name=kind_id" argument fills the \table{name} placeholder with the table
 // kind whose id is kind_id (see tableKinds() in tablekinds.cpp). A
 // "~name=choice" argument picks a \variant{name|...}: `choice` may be a 1-based
 // option index or the option text verbatim. Variant names with spaces need
-// quoting, e.g. "~обращение к клиенту=1".
+// quoting, e.g. "~обращение к клиенту=1". By default inserted values are
+// highlighted yellow; pass --no-highlight to insert them without any highlight.
 int renderHeadless(int argc, char** argv) {
     if (argc < 4) {
         std::fprintf(stderr,
                      "Usage: %s --render <in.docx> <out.docx> "
                      "[NAME=VALUE ...] [~VARIANT=choice ...] "
-                     "[+TABLE=kind_id ...]\n",
+                     "[+TABLE=kind_id ...] [--no-highlight]\n",
                      argv[0]);
         return 1;
     }
@@ -1290,8 +1372,13 @@ int renderHeadless(int argc, char** argv) {
             if (f.kind == FieldKind::Variant)
                 variantOptions.emplace(f.name, f.options);
 
+    bool highlight = true;  // default: highlight inserted values yellow
     for (int i = 4; i < argc; ++i) {
         std::string a = argv[i];
+        if (a == "--no-highlight") {  // insert values without yellow highlight
+            highlight = false;
+            continue;
+        }
         size_t eq = a.find('=');
         if (eq == std::string::npos) continue;
         if (!a.empty() && a[0] == '+') {  // table selection: +name=kind_id
@@ -1325,7 +1412,7 @@ int renderHeadless(int argc, char** argv) {
         return 1;
     }
     std::string newXml =
-        transformDocument(xml, values, variantChoices, tableData);
+        transformDocument(xml, values, variantChoices, tableData, highlight);
     for (auto& m : members)
         if (m.first == "word/document.xml") m.second = newXml;
     std::string bytes = buildZipStored(members);
@@ -1349,23 +1436,21 @@ int main(int argc, char** argv) {
 
     QApplication app(argc, argv);
 
-    QString path;
-    if (argc >= 2)
-        path = QString::fromLocal8Bit(argv[1]);
-    else
-        path = QFileDialog::getOpenFileName(
-            nullptr, QString::fromUtf8("Выберите шаблон .docx"), QString(),
-            QString::fromUtf8("Документ Word (*.docx)"));
-    if (path.isEmpty()) return 0;
-
-    QString err;
-    QWidget* w = docxform::openTemplateForm(path, &err);
-    if (!w) {
-        QMessageBox::critical(nullptr, QString::fromUtf8("Ошибка"), err);
-        return 1;
+    if (argc >= 2) {
+        // A template path was given on the command line: open it directly.
+        QString err;
+        QWidget* w =
+            docxform::openTemplateForm(QString::fromLocal8Bit(argv[1]), &err);
+        if (!w) {
+            QMessageBox::critical(nullptr, QString::fromUtf8("Ошибка"), err);
+            return 1;
+        }
+        w->setAttribute(Qt::WA_DeleteOnClose);
+        w->show();
+    } else {
+        // No file given: the same interactive flow exposed to embedders.
+        if (!docxform::showTemplateForm()) return 0;  // cancelled or failed
     }
-    w->setAttribute(Qt::WA_DeleteOnClose);
-    w->show();
     return app.exec();
 }
 #endif  // DOCXFORM_NO_MAIN

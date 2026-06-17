@@ -47,6 +47,23 @@ namespace docxform {
 QWidget* openTemplateForm(const QString& templatePath, QString* error = nullptr,
                           QWidget* parent = nullptr);
 
+// Convenience entry point for embedding: reproduce the WHOLE standalone GUI flow
+// from a host application with one call. It pops a file chooser for a .docx
+// template, builds the form and shows it as a top-level window (deleted on
+// close); on error it shows a message box itself. Returns the shown window, or
+// nullptr if the user cancelled the chooser or opening failed.
+//
+// This is exactly what the standalone program does when launched without a file
+// argument, so you can wire it straight to a button's clicked() slot to start
+// the module "as if launched on its own":
+//
+//     connect(myButton, &QPushButton::clicked, this,
+//             [this]{ docxform::showTemplateForm(this); });
+//
+// A QApplication must already exist (your app has one). `parent`, if given, owns
+// the dialog and the window for stacking and lifetime.
+QWidget* showTemplateForm(QWidget* parent = nullptr);
+
 }  // namespace docxform
 
 #endif  // DOCXFORM_H
