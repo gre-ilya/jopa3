@@ -1,9 +1,9 @@
 // docxform.h - public API of the docxform GUI templater.
 //
 // This header lets you embed the docxform window inside another Qt application:
-// you give it the path of a .docx template (with {{placeholders}} and optional
-// \table{name} markers) and get back a ready-to-show widget that asks the user
-// for the values and writes the filled .docx itself.
+// you give it the path of a .docx template (with \var{...} variables and
+// optional \variant{...} / \table{name} markers) and get back a ready-to-show
+// widget that asks the user for the values and writes the filled .docx itself.
 //
 // To reuse it, link docxform.cpp (built WITH the macro DOCXFORM_NO_MAIN, so its
 // own main() is dropped) together with tablekinds.cpp, and include this header:
