@@ -14,6 +14,7 @@
 #define DOCXFORM_TABLEKINDS_H
 
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -57,6 +58,22 @@ struct FixedTable {
 // e.g. map "\\tableprice" to the "price" kind. Tags must start with '\\', be
 // distinct, and not be a prefix of one another or of "\\table{".
 std::vector<FixedTable> fixedTables();
+
+// Runtime data your application feeds to table builders. A build() function runs
+// at GENERATION time, so it can return DIFFERENT rows every time depending on
+// what your program put here — while the columns (headers) stay fixed. Key it by
+// the placeholder/tag name the table fills (the `name` build() receives, e.g.
+// "\\tablewage" for a fixed tag) so each table reads its own rows.
+//
+// From your host application, before generating, just fill it:
+//     docxform::tableContext()["\\tablewage"] = {
+//         {"Иванов И. И.", "100000"},
+//         {"Петров П. П.", "90000"},
+//     };
+// and have that tag's build() copy `tableContext()[name]` into TableData::rows
+// (see the "runtime" demo kind in tablekinds.cpp). Returns a reference to a
+// process-wide store; change its value type here if you need richer data.
+std::map<std::string, std::vector<std::vector<std::string>>>& tableContext();
 
 // Render a TableData as an OOXML <w:tbl>...</w:tbl> fragment (with visible
 // borders and a bold header row). Reusable on its own.

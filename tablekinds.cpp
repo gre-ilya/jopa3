@@ -107,6 +107,21 @@ TableData paymentSchedule(const std::string&) {
     return t;
 }
 
+// 5) FIXED COLUMNS, RUNTIME ROWS. The columns never change, but the cell values
+//    come from data your program supplies at generation time via tableContext(),
+//    keyed by the placeholder/tag name (`name`). This is the pattern to use for a
+//    fixed tag whose contents differ per run — fill tableContext()[tag] from your
+//    host app before generating, and the rows appear here. See README and the
+//    "\tableruntime" fixed tag below.
+TableData runtimeTable(const std::string& name) {
+    TableData t;
+    t.headers = {"Колонка A", "Колонка B"};  // fixed columns, change as needed
+    auto it = tableContext().find(name);
+    if (it != tableContext().end())
+        t.rows = it->second;  // cells supplied by the host at runtime
+    return t;
+}
+
 }  // namespace
 
 // ---- The registry ---------------------------------------------------------
@@ -117,7 +132,15 @@ std::vector<TableKind> tableKinds() {
     kinds.push_back({"price",     "Прайс-лист (пример)",            priceList});
     kinds.push_back({"employees", "Сотрудники (пример)",            employees});
     kinds.push_back({"schedule",  "График платежей (генерируется)", paymentSchedule});
+    kinds.push_back({"runtime",   "Строки из данных программы (демо)", runtimeTable});
     return kinds;
+}
+
+// Runtime data store read by builders such as runtimeTable(). One process-wide
+// instance; your host application fills it before generating (see the header).
+std::map<std::string, std::vector<std::vector<std::string>>>& tableContext() {
+    static std::map<std::string, std::vector<std::vector<std::string>>> ctx;
+    return ctx;
 }
 
 // ---- The fixed-tag registry -----------------------------------------------
@@ -131,8 +154,9 @@ std::vector<TableKind> tableKinds() {
 //      Word, including the leading backslash, e.g. "\\tablewage".
 std::vector<FixedTable> fixedTables() {
     std::vector<FixedTable> fixed;
-    fixed.push_back({"\\tableprice", "price"});      // \tableprice -> price kind
-    fixed.push_back({"\\tablewage",  "employees"});  // \tablewage  -> employees kind
+    fixed.push_back({"\\tableprice",   "price"});      // \tableprice   -> price kind
+    fixed.push_back({"\\tablewage",    "employees"});  // \tablewage    -> employees kind
+    fixed.push_back({"\\tableruntime", "runtime"});    // \tableruntime -> runtime rows
     return fixed;
 }
 
