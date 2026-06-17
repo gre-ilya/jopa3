@@ -4,13 +4,13 @@
 //   1. In Word/Google Docs/LibreOffice you write a document and mark the parts
 //      that should change with \var{...} placeholders named in plain ASCII.
 //      Two forms are accepted:
-//        \var{value}        - a variable called `value`; the field gets the
-//                             default tooltip.
-//        \var{info|value}   - same variable `value`, but `info` (free-form text
-//                             before the last '|') becomes the field's tooltip
-//                             instead of the default one.
-//      e.g. "Dear \var{client_name}, your order \var{order id|order_id} is
-//      \var{status}."
+//        \var{name}        - a variable called `name`; the field gets the
+//                            default tooltip.
+//        \var{name|info}   - same variable `name`, but `info` (free-form text
+//                            after the first '|') becomes the field's tooltip
+//                            instead of the default one.
+//      e.g. "Dear \var{client_name}, your order \var{order_id|the order number}
+//      is \var{status}."
 //   2. docxform opens the .docx, finds every \var{...}, and shows a window with
 //      one text field per variable (the field label is the variable name).
 //   3. You type the values and press "Создать документ…".
@@ -440,15 +440,16 @@ std::string trimAscii(const std::string& s) {
 }
 
 // Find the next \var{...} variable at or after `from`. Two forms are accepted:
-//   \var{value}        -> name = value, info = ""    (default tooltip)
-//   \var{info|value}   -> name = value, info = info  (custom tooltip text)
-// `value` is the variable identifier [A-Za-z0-9_]+ (surrounding ASCII spaces
-// trimmed); it doubles as the field label and the substitution key. `info`, when
-// present, is everything before the LAST '|' inside the braces, trimmed of
-// ASCII whitespace — so it may itself contain spaces, commas, punctuation and
+//   \var{name}        -> name = name, info = ""    (default tooltip)
+//   \var{name|info}   -> name = name, info = info  (custom tooltip text)
+// `name` is the variable identifier [A-Za-z0-9_]+ (surrounding ASCII spaces
+// trimmed); it is both the field label and the substitution key — a name filled
+// once is substituted at every occurrence. `info`, when present, is everything
+// after the FIRST '|' inside the braces, trimmed of ASCII whitespace — so it may
+// itself contain '|', commas and other punctuation, as well as spaces and
 // non-ASCII text (e.g. Russian). The '|' separator mirrors \variant{...}. On
 // success sets begin/end (byte range of the whole \var{...}), name and info; a
-// malformed \var{...} (empty/invalid value) is skipped. Note: "\var{" is not a
+// malformed \var{...} (empty/invalid name) is skipped. Note: "\var{" is not a
 // prefix of "\variant{", so the two never collide.
 bool nextVarPlaceholder(const std::string& s, size_t from, size_t& begin,
                         size_t& end, std::string& name, std::string& info) {
@@ -460,18 +461,18 @@ bool nextVarPlaceholder(const std::string& s, size_t from, size_t& begin,
         std::string inner =
             s.substr(p + kMarker.size(), close - (p + kMarker.size()));
 
-        // Split off the value (after the last '|') from the optional info
-        // (everything before it). With no '|' the whole thing is the value.
-        std::string infoPart, valuePart;
-        size_t bar = inner.rfind('|');
+        // Split the name (before the first '|') from the optional info
+        // (everything after it). With no '|' the whole thing is the name.
+        std::string namePart, infoPart;
+        size_t bar = inner.find('|');
         if (bar == std::string::npos) {
-            valuePart = inner;
+            namePart = inner;
         } else {
-            infoPart = inner.substr(0, bar);
-            valuePart = inner.substr(bar + 1);
+            namePart = inner.substr(0, bar);
+            infoPart = inner.substr(bar + 1);
         }
 
-        std::string nm = trimAscii(valuePart);
+        std::string nm = trimAscii(namePart);
         bool validName = !nm.empty();
         for (char c : nm)
             if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) {
@@ -1074,7 +1075,7 @@ private:
     }
 
     // Full guidance for one variable — used as the field's tooltip. When the
-    // \var{...} carried an `info` part (\var{info|value}), that text REPLACES
+    // \var{...} carried an `info` part (\var{name|info}), that text REPLACES
     // the default tooltip, exactly as authored. Otherwise the default guidance
     // is shown. Wrapped in <span> so Qt always renders it as rich text (and
     // escaped entities display correctly).
