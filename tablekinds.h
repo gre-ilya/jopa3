@@ -43,6 +43,21 @@ struct TableKind {
 // function (in tablekinds.cpp) to add, remove or change kinds.
 std::vector<TableKind> tableKinds();
 
+// A "fixed" table tag: a bare placeholder (no braces, e.g. "\\tablewage") that
+// is ALWAYS replaced by one specific table kind, with no drop-down in the GUI
+// and no argument in headless mode. Use it for tables that always look the same
+// in your documents.
+struct FixedTable {
+    std::string tag;     // the literal placeholder in the document, e.g. "\\tablewage"
+    std::string kindId;  // id of the TableKind (see tableKinds()) to always use
+};
+
+// THE FIXED-TAG REGISTRY. Returns every fixed tag and the table kind it always
+// maps to. Edit the body of this function (in tablekinds.cpp) to add your own,
+// e.g. map "\\tableprice" to the "price" kind. Tags must start with '\\', be
+// distinct, and not be a prefix of one another or of "\\table{".
+std::vector<FixedTable> fixedTables();
+
 // Render a TableData as an OOXML <w:tbl>...</w:tbl> fragment (with visible
 // borders and a bold header row). Reusable on its own.
 std::string buildTableXml(const TableData& table);

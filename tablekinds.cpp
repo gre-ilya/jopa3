@@ -120,6 +120,22 @@ std::vector<TableKind> tableKinds() {
     return kinds;
 }
 
+// ---- The fixed-tag registry -----------------------------------------------
+// Map bare tags like "\tablewage" to a specific kind id from tableKinds() above.
+// Wherever such a tag appears in a document, that table is inserted
+// automatically — no GUI drop-down, no headless argument. Add your own lines.
+//
+// Steps to add a new fixed tag:
+//   1. Make sure the table kind exists in tableKinds() (note its id).
+//   2. Add a {tag, kindId} line below. The tag is the exact text you type in
+//      Word, including the leading backslash, e.g. "\\tablewage".
+std::vector<FixedTable> fixedTables() {
+    std::vector<FixedTable> fixed;
+    fixed.push_back({"\\tableprice", "price"});      // \tableprice -> price kind
+    fixed.push_back({"\\tablewage",  "employees"});  // \tablewage  -> employees kind
+    return fixed;
+}
+
 // ---- OOXML rendering ------------------------------------------------------
 
 std::string buildTableXml(const TableData& table) {
