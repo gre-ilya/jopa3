@@ -44,7 +44,7 @@ struct TableKind {
 std::vector<TableKind> tableKinds();
 
 // Render a TableData as an OOXML <w:tbl>...</w:tbl> fragment (with visible
-// borders and a shaded, bold header row). Reusable on its own.
+// borders and a bold header row). Reusable on its own.
 std::string buildTableXml(const TableData& table);
 
 }  // namespace docxform

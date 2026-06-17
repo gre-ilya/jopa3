@@ -20,7 +20,7 @@
 //     for every \table{...} placeholder.
 //
 //  Cells are plain text (UTF-8). Newlines inside a cell are kept as separate
-//  lines. Borders and a bold, shaded header row are added automatically by
+//  lines. Borders and a bold header row are added automatically by
 //  buildTableXml(), so builders only deal with content.
 // =====================================================================
 
@@ -130,10 +130,9 @@ std::string buildTableXml(const TableData& table) {
 
     auto cell = [&](const std::string& text, bool header) {
         std::string rpr = header ? "<w:rPr><w:b/></w:rPr>" : "";
-        std::string tcpr =
-            header ? "<w:tcPr><w:shd w:val=\"clear\" w:color=\"auto\" "
-                     "w:fill=\"D9D9D9\"/></w:tcPr>"
-                   : "";
+        // Header cells are bold but keep the same white background as the rest
+        // of the table (no <w:shd> fill).
+        std::string tcpr;
         // Split the cell text on newlines into separate paragraphs.
         std::string body;
         size_t start = 0;
