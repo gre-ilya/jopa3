@@ -516,6 +516,42 @@ bool nextTablePlaceholder(const std::string& s, size_t from, size_t& begin,
     return false;
 }
 
+// Find the next FIXED table tag (e.g. "\tablewage") at or after `from`. These
+// are bare tags registered in docxform::fixedTables(), each always mapped to one
+// table kind. On success sets begin/end (range of the tag) and `tag` (the
+// matched literal, which is used as the lookup key). When several tags would
+// match, the earliest position wins (the longest tag on a tie). A match must end
+// on a word boundary, so "\tablewage" does not fire inside "\tablewages".
+bool nextFixedTable(const std::string& s, size_t from, size_t& begin,
+                    size_t& end, std::string& tag) {
+    size_t best = std::string::npos, bestEnd = 0;
+    std::string bestTag;
+    for (const docxform::FixedTable& ft : docxform::fixedTables()) {
+        if (ft.tag.empty()) continue;
+        size_t p = s.find(ft.tag, from);
+        while (p != std::string::npos) {
+            size_t after = p + ft.tag.size();
+            char c = (after < s.size()) ? s[after] : '\0';
+            bool boundary =
+                !(std::isalnum(static_cast<unsigned char>(c)) || c == '_');
+            if (boundary) {
+                if (p < best || (p == best && ft.tag.size() > bestTag.size())) {
+                    best = p;
+                    bestEnd = after;
+                    bestTag = ft.tag;
+                }
+                break;  // earliest occurrence of this tag is enough
+            }
+            p = s.find(ft.tag, p + 1);
+        }
+    }
+    if (best == std::string::npos) return false;
+    begin = best;
+    end = bestEnd;
+    tag = bestTag;
+    return true;
+}
+
 // Find the next \variant{name|opt1|opt2|...} at or after `from`. The name is the
 // text before the first '|' (trimmed of ASCII whitespace; it may contain spaces
 // and non-ASCII bytes, e.g. Russian). The options are the '|'-separated parts
@@ -780,9 +816,19 @@ std::string transformParagraph(
     return out;
 }
 
+// Build every registered fixed-tag table into `out`, keyed by its tag (so e.g.
+// out["\\tablewage"] holds the content for \tablewage) by running each tag's own
+// builder. Both the GUI and the headless path call this, so fixed tables are
+// always inserted automatically, with no user input.
+void addFixedTables(std::map<std::string, docxform::TableData>& out) {
+    for (const docxform::FixedTable& ft : docxform::fixedTables())
+        if (ft.build) out[ft.tag] = ft.build(ft.tag);
+}
+
 // Walk document.xml and, for every <w:p>:
-//   - if (at body level) it holds a \table{name} placeholder whose table the
-//     user selected, replace the WHOLE paragraph with the generated <w:tbl>;
+//   - if (at body level) it holds a table placeholder (a fixed tag like
+//     \tablewage, or a \table{name} the user selected), replace the WHOLE
+//     paragraph with the generated <w:tbl>;
 //   - otherwise substitute its \var{...} variables as usual.
 // `tables` maps a placeholder name to the table content chosen for it;
 // `variantChoices` maps a \variant{...} name to its chosen option text.
@@ -818,14 +864,34 @@ std::string transformDocument(
             if (close == std::string::npos) break;
             std::string inner = xml.substr(e + 1, close - e - 1);
 
-            // Does this paragraph contain a selected \table{...}? (body only)
+            // Does this paragraph contain a table placeholder? (body only) Both
+            // fixed tags (\tablewage, keyed by the tag) and \table{name} (keyed
+            // by the name) are handled, in document order; each looks its content
+            // up in `tables`.
             std::string tablesXml;
             if (tableDepth == 0 && !tables.empty()) {
                 std::string P = concatParagraphText(inner);
-                size_t pos = 0, b, en;
-                std::string name;
-                while (nextTablePlaceholder(P, pos, b, en, name)) {
-                    auto it = tables.find(name);
+                size_t pos = 0;
+                for (;;) {
+                    size_t fb, fe;
+                    std::string ftag;
+                    bool haveFixed = nextFixedTable(P, pos, fb, fe, ftag);
+                    size_t tb, te;
+                    std::string tname;
+                    bool haveTable = nextTablePlaceholder(P, pos, tb, te, tname);
+
+                    std::string key;
+                    size_t advance;
+                    if (haveFixed && (!haveTable || fb <= tb)) {
+                        key = ftag;
+                        advance = fe;
+                    } else if (haveTable) {
+                        key = tname;
+                        advance = te;
+                    } else {
+                        break;
+                    }
+                    auto it = tables.find(key);
                     if (it != tables.end()) {
                         // Two <w:tbl> in a row must be separated by a paragraph
                         // (OOXML would otherwise merge them), but no trailing
@@ -833,7 +899,7 @@ std::string transformDocument(
                         if (!tablesXml.empty()) tablesXml += "<w:p/>";
                         tablesXml += docxform::buildTableXml(it->second);
                     }
-                    pos = en;
+                    pos = advance;
                 }
             }
 
@@ -965,6 +1031,37 @@ std::vector<FormBlock> collectFormBlocks(const std::string& xml) {
         i = e + 1;
     }
     return blocks;
+}
+
+// Collect the fixed-tag tables (\tablewage, ...) actually present in the
+// document, in first-seen order. Used by --vars so you can confirm a tag is
+// recognised. These need no user input — see addFixedTables.
+std::vector<std::string> collectFixedTables(const std::string& xml) {
+    std::vector<std::string> out;
+    std::set<std::string> seen;
+    size_t i = 0;
+    while ((i = xml.find('<', i)) != std::string::npos) {
+        if (i + 1 < xml.size() && xml[i + 1] != '/' && tagIs(xml, i, "p")) {
+            size_t e = xml.find('>', i);
+            if (e == std::string::npos) break;
+            if (xml[e - 1] == '/') { i = e + 1; continue; }
+            size_t close = findClose(xml, e + 1, "p");
+            if (close == std::string::npos) break;
+            std::string P = concatParagraphText(xml.substr(e + 1, close - e - 1));
+            size_t pos = 0, b, en;
+            std::string tag;
+            while (nextFixedTable(P, pos, b, en, tag)) {
+                if (seen.insert(tag).second) out.push_back(tag);
+                pos = en;
+            }
+            i = close;
+            continue;
+        }
+        size_t e = xml.find('>', i);
+        if (e == std::string::npos) break;
+        i = e + 1;
+    }
+    return out;
 }
 
 // ---- GUI ------------------------------------------------------------------
@@ -1189,6 +1286,8 @@ private:
                 if (kind.build) tableData[kv.first] = kind.build(kv.first);
             }
         }
+        // Fixed tags (\tablewage, ...) are always inserted, no control needed.
+        addFixedTables(tableData);
 
         QString suggested = QFileInfo(path_).absoluteDir().filePath(
             QFileInfo(path_).completeBaseName() + "_filled.docx");
@@ -1302,6 +1401,7 @@ QWidget* showTemplateForm(QWidget* parent) {
 //   VAR\t<name>\t<paragraph context>
 //   VARIANT\t<name>\t<opt1>|<opt2>|...
 //   TABLE\t<name>
+//   FIXEDTABLE\t<tag>               (always-inserted fixed tag, e.g. \tablewage)
 int listVars(int argc, char** argv) {
     if (argc < 3) {
         std::fprintf(stderr, "Usage: %s --vars <in.docx>\n", argv[0]);
@@ -1329,6 +1429,9 @@ int listVars(int argc, char** argv) {
             }
         }
     }
+    // Fixed-tag tables present in the document (always auto-inserted).
+    for (const auto& tag : collectFixedTables(xml))
+        std::printf("FIXEDTABLE\t%s\n", tag.c_str());
     return 0;
 }
 
@@ -1406,6 +1509,9 @@ int renderHeadless(int argc, char** argv) {
             values[a.substr(0, eq)] = a.substr(eq + 1);
         }
     }
+    // Fixed tags (\tablewage, ...) are always inserted, no argument needed.
+    addFixedTables(tableData);
+
     std::vector<std::pair<std::string, std::string>> members;
     if (!listZipMembers(zip, members)) {
         std::fprintf(stderr, "Error: cannot parse '%s'\n", argv[2]);

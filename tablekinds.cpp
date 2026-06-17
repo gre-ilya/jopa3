@@ -107,6 +107,35 @@ TableData paymentSchedule(const std::string&) {
     return t;
 }
 
+// 5) FIXED COLUMNS, RUNTIME ROWS. The columns never change, but the cell values
+//    come from data your program supplies at generation time via tableContext(),
+//    keyed by the placeholder/tag name (`name`). This is the pattern to use for a
+//    fixed tag whose contents differ per run — fill tableContext()[tag] from your
+//    host app before generating, and the rows appear here. See README and the
+//    "\tableruntime" fixed tag below.
+TableData runtimeTable(const std::string& name) {
+    TableData t;
+    t.headers = {"Колонка A", "Колонка B"};  // fixed columns, change as needed
+    auto it = tableContext().find(name);
+    if (it != tableContext().end())
+        t.rows = it->second;  // cells supplied by the host at runtime
+    return t;
+}
+
+// 6) Logic dedicated to ONE specific tag (\tablewage). A fixed tag is bound
+//    straight to a function like this, so you run exactly the code you want for
+//    that tag. Compute the rows however you like (here: a tiny hard-coded
+//    example; in your app pull them from your data, a file, a DB, etc.).
+TableData wageReport(const std::string& /*tag*/) {
+    TableData t;
+    t.headers = {"Сотрудник", "Оклад, руб."};  // fixed columns
+    t.rows = {
+        {"Иванов И. И.", "100000"},
+        {"Петров П. П.", "90000"},
+    };
+    return t;
+}
+
 }  // namespace
 
 // ---- The registry ---------------------------------------------------------
@@ -117,7 +146,32 @@ std::vector<TableKind> tableKinds() {
     kinds.push_back({"price",     "Прайс-лист (пример)",            priceList});
     kinds.push_back({"employees", "Сотрудники (пример)",            employees});
     kinds.push_back({"schedule",  "График платежей (генерируется)", paymentSchedule});
+    kinds.push_back({"runtime",   "Строки из данных программы (демо)", runtimeTable});
     return kinds;
+}
+
+// Runtime data store read by builders such as runtimeTable(). One process-wide
+// instance; your host application fills it before generating (see the header).
+std::map<std::string, std::vector<std::vector<std::string>>>& tableContext() {
+    static std::map<std::string, std::vector<std::vector<std::string>>> ctx;
+    return ctx;
+}
+
+// ---- The fixed-tag registry -----------------------------------------------
+// Map bare tags like "\tablewage" to a specific kind id from tableKinds() above.
+// Wherever such a tag appears in a document, that table is inserted
+// automatically — no GUI drop-down, no headless argument. Add your own lines.
+//
+// Steps to add a new fixed tag:
+//   1. Make sure the table kind exists in tableKinds() (note its id).
+//   2. Add a {tag, kindId} line below. The tag is the exact text you type in
+//      Word, including the leading backslash, e.g. "\\tablewage".
+std::vector<FixedTable> fixedTables() {
+    std::vector<FixedTable> fixed;
+    fixed.push_back({"\\tableprice",   priceList});     // reuse an existing builder
+    fixed.push_back({"\\tablewage",    wageReport});    // logic dedicated to this tag
+    fixed.push_back({"\\tableruntime", runtimeTable});  // rows from tableContext()
+    return fixed;
 }
 
 // ---- OOXML rendering ------------------------------------------------------
