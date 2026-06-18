@@ -45,7 +45,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <map>
 #include <set>
 #include <string>
@@ -57,6 +56,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -74,13 +74,26 @@
 namespace {
 
 // ---- File I/O -------------------------------------------------------------
+//
+// All file access goes through QFile (not std::fstream), so non-ASCII paths —
+// e.g. Cyrillic file names — open correctly on every platform, including
+// Windows, where the narrow std::fstream would use the ANSI code page. For
+// command-line paths use QFile::decodeName(argv[i]) to get the QString.
 
-bool readWholeFile(const std::string& path, std::string& out) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return false;
-    out.assign(std::istreambuf_iterator<char>(in),
-               std::istreambuf_iterator<char>());
+bool readWholeFile(const QString& path, std::string& out) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    const QByteArray data = f.readAll();
+    out.assign(data.constData(), static_cast<size_t>(data.size()));
     return true;
+}
+
+bool writeWholeFile(const QString& path, const std::string& bytes) {
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    const qint64 n = f.write(bytes.data(), static_cast<qint64>(bytes.size()));
+    f.close();
+    return n == static_cast<qint64>(bytes.size());
 }
 
 // ---- ZIP reader -----------------------------------------------------------
@@ -1311,15 +1324,12 @@ private:
             if (m.first == "word/document.xml") m.second = newXml;
 
         std::string bytes = buildZipStored(members);
-        std::ofstream out(outPath.toStdString(), std::ios::binary);
-        if (!out) {
+        if (!writeWholeFile(outPath, bytes)) {
             QMessageBox::critical(
                 this, QString::fromUtf8("Ошибка"),
                 QString::fromUtf8("Не удалось записать файл:\n%1").arg(outPath));
             return;
         }
-        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-        out.close();
 
         QMessageBox::information(
             this, QString::fromUtf8("Готово"),
@@ -1358,7 +1368,7 @@ QWidget* openTemplateForm(const QString& templatePath, QString* error,
     };
 
     std::string zip;
-    if (!readWholeFile(templatePath.toStdString(), zip))
+    if (!readWholeFile(templatePath, zip))
         return fail(QString::fromUtf8("Не удалось открыть файл:\n%1")
                         .arg(templatePath));
     std::string xml;
@@ -1408,7 +1418,7 @@ int listVars(int argc, char** argv) {
         return 1;
     }
     std::string zip, xml;
-    if (!readWholeFile(argv[2], zip) ||
+    if (!readWholeFile(QFile::decodeName(argv[2]), zip) ||
         !extractZipMember(zip, "word/document.xml", xml)) {
         std::fprintf(stderr, "Error: cannot read .docx '%s'\n", argv[2]);
         return 1;
@@ -1454,7 +1464,7 @@ int renderHeadless(int argc, char** argv) {
         return 1;
     }
     std::string zip;
-    if (!readWholeFile(argv[2], zip)) {
+    if (!readWholeFile(QFile::decodeName(argv[2]), zip)) {
         std::fprintf(stderr, "Error: cannot read '%s'\n", argv[2]);
         return 1;
     }
@@ -1522,12 +1532,10 @@ int renderHeadless(int argc, char** argv) {
     for (auto& m : members)
         if (m.first == "word/document.xml") m.second = newXml;
     std::string bytes = buildZipStored(members);
-    std::ofstream out(argv[3], std::ios::binary);
-    if (!out) {
+    if (!writeWholeFile(QFile::decodeName(argv[3]), bytes)) {
         std::fprintf(stderr, "Error: cannot write '%s'\n", argv[3]);
         return 1;
     }
-    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     return 0;
 }
 
@@ -1546,7 +1554,7 @@ int main(int argc, char** argv) {
         // A template path was given on the command line: open it directly.
         QString err;
         QWidget* w =
-            docxform::openTemplateForm(QString::fromLocal8Bit(argv[1]), &err);
+            docxform::openTemplateForm(QFile::decodeName(argv[1]), &err);
         if (!w) {
             QMessageBox::critical(nullptr, QString::fromUtf8("Ошибка"), err);
             return 1;
