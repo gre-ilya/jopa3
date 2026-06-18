@@ -255,11 +255,17 @@ g++ -O2 -std=c++17 -fPIC docxform.cpp tablekinds.cpp -o docxform \
 Файловый ввод/вывод идёт через `QFile`, поэтому **пути с не-ASCII символами
 (кириллица и т.п.) корректно открываются и на Windows**.
 
-- **Linux / macOS:** `make` (Linux) или qmake; zlib линкуется через `-lz`.
+- **Linux / macOS:** `make` (Linux) или qmake; компилируется как gcc, так и
+  clang; zlib линкуется через `-lz`.
 - **Windows:** собирайте через qmake — подключите `docxform.pri` в свой `.pro`
-  (см. «Встраивание»). С **MinGW** zlib подхватывается через `-lz`; с **MSVC**
-  стандартного zlib нет — укажите свой (пример с путями есть в комментарии внутри
-  `docxform.pri`). `Makefile` рассчитан только на Linux — на Windows используйте
+  (см. «Встраивание»). Поддерживаются оба варианта **clang** (а также MSVC):
+  - **clang в MinGW-режиме** (`win32-clang-g++`) и **MinGW gcc** — zlib
+    подхватывается через `-lz` автоматически;
+  - **clang-cl** (`win32-clang-msvc`) и **MSVC** — стандартного zlib нет, укажите
+    свой (пример с путями в комментарии внутри `docxform.pri`).
+
+  `.pri` сам выбирает нужный вариант по типу драйвера (qmake-scope `gcc`).
+  `Makefile` рассчитан только на Linux — на Windows используйте
   qmake/`docxform.pri` или свою сборку.
 
 Замечание: для **CLI** на Windows пути берутся из узкого `argv`, поэтому имена с

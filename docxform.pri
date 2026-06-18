@@ -28,14 +28,15 @@ SOURCES += \
 
 DEFINES += DOCXFORM_NO_MAIN
 
-# zlib. On Linux/macOS and MinGW the system zlib links with -lz. MSVC has no
-# default zlib, so provide one yourself and point the build at it — for example:
-#   win32-msvc* {
-#       INCLUDEPATH += C:/path/to/zlib/include
-#       LIBS += -LC:/path/to/zlib/lib -lzlib   # or zlibstatic.lib / zdll.lib
-#   }
-win32-msvc* {
-    # Supply zlib for MSVC here (see the note above); -lz does not apply.
-} else {
+# zlib. GNU-style drivers — gcc and clang with the g++/clang++ driver (Linux,
+# macOS, MinGW, and clang in MinGW mode) — link zlib with -lz. MSVC-style drivers
+# (cl and clang-cl) have no default zlib, so provide one yourself there, e.g.:
+#   INCLUDEPATH += C:/path/to/zlib/include
+#   LIBS += -LC:/path/to/zlib/lib -lzlib   # or zlibstatic.lib / zdll.lib
+# The `gcc` scope is true for GCC and Clang in g++/clang++ mode and false for
+# MSVC and clang-cl, so it picks exactly the toolchains where -lz applies.
+gcc {
     LIBS += -lz
+} else {
+    # MSVC / clang-cl: no default zlib — provide your own (see the note above).
 }
