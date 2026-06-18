@@ -64,11 +64,11 @@ jobs:
           clang++ -O2 -std=c++17 docxform.cpp tablekinds.cpp -o docxform.exe \
             $(pkg-config --cflags --libs Qt5Widgets) -lz
 
-      - name: Build embedding host via docxform.pri (qmake, clang)
-        working-directory: ci
+      - name: Build embedding host (clang++, DOCXFORM_NO_MAIN)
         run: |
-          qmake embed.pro
-          make
+          clang++ -O2 -std=c++17 -DDOCXFORM_NO_MAIN -I. \
+            ci/embed_main.cpp docxform.cpp tablekinds.cpp -o embedhost.exe \
+            $(pkg-config --cflags --libs Qt5Widgets) -lz
 
       - name: Smoke test (headless --render)
         run: |
