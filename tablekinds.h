@@ -82,7 +82,7 @@ std::vector<FixedTable> fixedTables();
 std::map<std::string, std::vector<std::vector<std::string>>>& tableContext();
 
 // Render a TableData as an OOXML <w:tbl>...</w:tbl> fragment (with visible
-// borders and a bold header row). Reusable on its own.
+// borders and centered cell text). Reusable on its own.
 std::string buildTableXml(const TableData& table);
 
 }  // namespace docxform

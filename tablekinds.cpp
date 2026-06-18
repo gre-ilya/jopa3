@@ -20,7 +20,7 @@
 //     for every \table{...} placeholder.
 //
 //  Cells are plain text (UTF-8). Newlines inside a cell are kept as separate
-//  lines. Borders and a bold header row are added automatically by
+//  lines. Borders and centered cell text are added automatically by
 //  buildTableXml(), so builders only deal with content.
 // =====================================================================
 
@@ -192,32 +192,33 @@ std::string buildTableXml(const TableData& table) {
     const int tableDxa = colDxa * static_cast<int>(cols);
     const std::string colW = std::to_string(colDxa);
 
-    auto cell = [&](const std::string& text, bool header) {
-        std::string rpr = header ? "<w:rPr><w:b/></w:rPr>" : "";
-        // Header cells are bold but keep the same white background as the rest
-        // of the table (no <w:shd> fill). Every cell gets the same preferred
-        // width so all columns come out equal.
-        std::string tcpr =
-            "<w:tcPr><w:tcW w:w=\"" + colW + "\" w:type=\"dxa\"/></w:tcPr>";
-        // Split the cell text on newlines into separate paragraphs.
+    auto cell = [&](const std::string& text) {
+        // Every cell gets the same preferred width (so all columns come out
+        // equal) and is centered both horizontally and vertically. No bold and
+        // no shaded header — header cells look the same as the rest.
+        std::string tcpr = "<w:tcPr><w:tcW w:w=\"" + colW +
+                           "\" w:type=\"dxa\"/><w:vAlign w:val=\"center\"/></w:tcPr>";
+        // Split the cell text on newlines into separate (centered) paragraphs.
         std::string body;
         size_t start = 0;
         for (size_t i = 0; i <= text.size(); ++i) {
             if (i == text.size() || text[i] == '\n') {
                 std::string line = text.substr(start, i - start);
-                body += "<w:p><w:r>" + rpr + "<w:t xml:space=\"preserve\">" +
-                        xmlEscape(line) + "</w:t></w:r></w:p>";
+                body += "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r>"
+                        "<w:t xml:space=\"preserve\">" + xmlEscape(line) +
+                        "</w:t></w:r></w:p>";
                 start = i + 1;
             }
         }
-        if (body.empty()) body = "<w:p/>";  // a cell must contain a paragraph
+        if (body.empty())  // a cell must contain a paragraph
+            body = "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr></w:p>";
         return "<w:tc>" + tcpr + body + "</w:tc>";
     };
 
-    auto row = [&](const std::vector<std::string>& cells, bool header) {
+    auto row = [&](const std::vector<std::string>& cells) {
         std::string r = "<w:tr>";
         for (size_t c = 0; c < cols; ++c)
-            r += cell(c < cells.size() ? cells[c] : std::string(), header);
+            r += cell(c < cells.size() ? cells[c] : std::string());
         r += "</w:tr>";
         return r;
     };
@@ -238,10 +239,10 @@ std::string buildTableXml(const TableData& table) {
         x += "<w:gridCol w:w=\"" + colW + "\"/>";
     x += "</w:tblGrid>";
 
-    if (!table.headers.empty()) x += row(table.headers, true);
-    for (const auto& r : table.rows) x += row(r, false);
+    if (!table.headers.empty()) x += row(table.headers);
+    for (const auto& r : table.rows) x += row(r);
     if (table.headers.empty() && table.rows.empty())
-        x += row({}, false);  // guarantee at least one row (valid OOXML)
+        x += row({});  // guarantee at least one row (valid OOXML)
 
     x += "</w:tbl>";
     return x;
