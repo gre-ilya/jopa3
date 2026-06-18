@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux (g++ & clang)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qtbase5-dev qtbase5-dev-tools qttools5-dev qt5-qmake \
+            pkg-config zlib1g-dev g++ clang make python3
+
+      - name: Build standalone (g++)
+        run: make clean && make CXX=g++
+
+      - name: Build standalone (clang++)
+        run: make clean && make CXX=clang++
+
+      - name: Build embedding host via docxform.pri (qmake)
+        working-directory: ci
+        run: |
+          qmake embed.pro
+          make
+
+      - name: Smoke test (headless --render)
+        run: |
+          python3 ci/make_sample.py sample.docx
+          ./docxform --render sample.docx out.docx "name=Test"
+          python3 ci/check_render.py out.docx
+
+  windows-clang:
+    name: Windows (clang, MSYS2 CLANG64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (CLANG64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-qt5-base
+            mingw-w64-clang-x86_64-zlib
+            mingw-w64-clang-x86_64-pkgconf
+            mingw-w64-clang-x86_64-python
+            make
+
+      - name: Build standalone (clang++)
+        run: |
+          clang++ -O2 -std=c++17 docxform.cpp tablekinds.cpp -o docxform.exe \
+            $(pkg-config --cflags --libs Qt5Widgets) -lz
+
+      - name: Build embedding host via docxform.pri (qmake, clang)
+        working-directory: ci
+        run: |
+          qmake embed.pro
+          make
+
+      - name: Smoke test (headless --render)
+        run: |
+          python ci/make_sample.py sample.docx
+          ./docxform.exe --render sample.docx out.docx "name=Test"
+          python ci/check_render.py out.docx
