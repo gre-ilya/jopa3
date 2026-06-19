@@ -86,6 +86,14 @@ std::vector<FixedText> fixedTexts();
 // process-wide store; change its value type here if you need richer data.
 std::map<std::string, std::vector<std::vector<std::string>>>& tableContext();
 
+// Runtime data your application feeds to TEXT builders — the text counterpart of
+// tableContext(). Key it by the tag (e.g. "\\company") so each text tag reads its
+// own value:
+//     docxform::textContext()["\\company"] = "ООО «Ромашка»";
+// and bind that tag to a build() that returns textContext()[tag] (see the
+// contextText() demo in tablekinds.cpp). Returns a process-wide store.
+std::map<std::string, std::string>& textContext();
+
 // Render a TableData as an OOXML <w:tbl>...</w:tbl> fragment (with visible
 // borders and centered cell text). Reusable on its own.
 std::string buildTableXml(const TableData& table);

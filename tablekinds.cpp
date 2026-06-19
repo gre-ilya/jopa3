@@ -153,12 +153,25 @@ std::string todayText(const std::string& /*tag*/) {
            "-" + pad2(lt->tm_mday);
 }
 
+// A text tag whose value the HOST program supplies at runtime via textContext(),
+// keyed by the tag. Fill textContext()[tag] before generating; this returns it.
+std::string contextText(const std::string& tag) {
+    auto it = textContext().find(tag);
+    return it != textContext().end() ? it->second : std::string();
+}
+
 }  // namespace
 
 // Runtime data store read by builders such as runtimeTable(). One process-wide
 // instance; your host application fills it before generating (see the header).
 std::map<std::string, std::vector<std::vector<std::string>>>& tableContext() {
     static std::map<std::string, std::vector<std::vector<std::string>>> ctx;
+    return ctx;
+}
+
+// Runtime text store read by contextText(); the host fills it before generating.
+std::map<std::string, std::string>& textContext() {
+    static std::map<std::string, std::string> ctx;
     return ctx;
 }
 
@@ -191,6 +204,7 @@ std::vector<FixedText> fixedTexts() {
     std::vector<FixedText> texts;
     texts.push_back({"\\company", companyText});  // constant text
     texts.push_back({"\\today",   todayText});    // computed at generation time
+    texts.push_back({"\\note",    contextText});  // text from textContext() (host)
     return texts;
 }
 
