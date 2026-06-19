@@ -768,8 +768,8 @@ std::string transformParagraph(
 
     // Resolve every inline placeholder to its replacement text up front:
     //   \var{...} / \variant{...} (form fields) and fixed text tags (\company, …,
-    // code-defined). (Fixed TABLE tags are handled in transformDocument.) Fixed
-    // text is not highlighted (it is code-defined content, like a table).
+    // code-defined). (Fixed TABLE tags are handled in transformDocument.) Like
+    // variables, fixed text is highlighted when `highlight` is on.
     struct M { size_t b, e; std::string repl; bool hl; };
     std::vector<M> ms;
     {
@@ -803,7 +803,7 @@ std::string transformParagraph(
         size_t pos = 0, b, e;
         std::string tag;
         while (nextFixedText(P, pos, b, e, tag)) {
-            ms.push_back({b, e, fixedTextValue(tag), false});
+            ms.push_back({b, e, fixedTextValue(tag), true});  // honour highlight
             pos = e;
         }
     }
