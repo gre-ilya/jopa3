@@ -26,6 +26,7 @@
 #include "tablekinds.h"
 
 #include <algorithm>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -135,6 +136,23 @@ TableData wageReport(const std::string& /*tag*/) {
     return t;
 }
 
+// ---- Demo TEXT builders ---------------------------------------------------
+// Each returns the text that its tag expands to (see fixedTexts() below).
+
+// A constant text tag: \company always expands to this string.
+std::string companyText(const std::string& /*tag*/) {
+    return "ООО «Ромашка»";
+}
+
+// A COMPUTED text tag: \today expands to the current date (YYYY-MM-DD) at the
+// moment the document is generated.
+std::string todayText(const std::string& /*tag*/) {
+    std::time_t now = std::time(nullptr);
+    std::tm* lt = std::localtime(&now);
+    return std::to_string(lt->tm_year + 1900) + "-" + pad2(lt->tm_mon + 1) +
+           "-" + pad2(lt->tm_mday);
+}
+
 }  // namespace
 
 // Runtime data store read by builders such as runtimeTable(). One process-wide
@@ -160,6 +178,20 @@ std::vector<FixedTable> fixedTables() {
     fixed.push_back({"\\tablewage",      wageReport});        // logic for this tag
     fixed.push_back({"\\tableruntime",   runtimeTable});      // rows from tableContext()
     return fixed;
+}
+
+// ---- The text-tag registry ------------------------------------------------
+// Each entry binds a bare tag (e.g. "\company") to a function returning the text
+// it expands to, inline. Writing the tag in a document always inserts that text.
+//
+// To add a new text tag: write a function returning a std::string (a constant or
+// computed), then add a {tag, function} line. The tag is the exact text you type
+// in Word, with the leading backslash.
+std::vector<FixedText> fixedTexts() {
+    std::vector<FixedText> texts;
+    texts.push_back({"\\company", companyText});  // constant text
+    texts.push_back({"\\today",   todayText});    // computed at generation time
+    return texts;
 }
 
 // ---- OOXML rendering ------------------------------------------------------

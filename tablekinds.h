@@ -1,14 +1,16 @@
-// tablekinds.h - the table module for docxform.
+// tablekinds.h - the custom-tag module for docxform.
 //
-// This is the CUSTOMIZATION POINT of the program: everything about which tables
-// exist, how many rows/columns they have, their column titles and their content
-// lives in tablekinds.cpp. The rest of docxform never needs to change when you
-// add a new kind of table.
+// This is the CUSTOMIZATION POINT of the program: the tags your documents use
+// and the content they expand to live in tablekinds.cpp. Two kinds of tag:
+//   - fixedTables() — tags that insert a generated table (e.g. \tablewage);
+//   - fixedTexts()  — tags replaced inline by text your code returns (e.g.
+//                     \company).
+// The rest of docxform never needs to change when you add a new tag.
 //
 // It is intentionally self-contained (it does not depend on the rest of
 // docxform), so the whole thing can be reused as a module inside another Qt
-// application: link tablekinds.cpp, define the tables you need in fixedTables()
-// and use buildTableXml() to turn a table's data into OOXML.
+// application: link tablekinds.cpp, define your tags in fixedTables()/
+// fixedTexts() and use buildTableXml() to turn a table's data into OOXML.
 
 #ifndef DOCXFORM_TABLEKINDS_H
 #define DOCXFORM_TABLEKINDS_H
@@ -47,6 +49,26 @@ struct FixedTable {
 // tablekinds.cpp) to add your own, e.g. bind "\\tablewage" to your buildWage().
 // Tags must start with '\\' and be distinct (and not a prefix of one another).
 std::vector<FixedTable> fixedTables();
+
+// A custom TEXT tag: a bare placeholder (e.g. "\\company") replaced INLINE by
+// text your code returns. Unlike a fixed table (which replaces a whole
+// paragraph), a text tag substitutes just the tag and keeps the surrounding text
+// and run formatting — like a code-defined \var. No GUI, no headless argument.
+struct FixedText {
+    std::string tag;  // the literal placeholder in the document, e.g. "\\company"
+
+    // Returns the replacement text for this tag. Called at generation time with
+    // the tag itself, so the text may be constant or computed (date, data from
+    // your app, etc.). It is plain text and is XML-escaped on insertion.
+    std::function<std::string(const std::string& tag)> build;
+};
+
+// THE TEXT-TAG REGISTRY. Returns every custom text tag and the function that
+// produces its text. Edit the body of this function (in tablekinds.cpp) to add
+// your own, e.g. bind "\\company" to a function returning your company name.
+// Tags follow the same rules as table tags (start with '\\', be distinct, not a
+// prefix of one another or of a table tag).
+std::vector<FixedText> fixedTexts();
 
 // Runtime data your application feeds to table builders. A build() function runs
 // at GENERATION time, so it can return DIFFERENT rows every time depending on

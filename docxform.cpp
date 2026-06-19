@@ -27,6 +27,11 @@
 // where you add new ones. Fixed tags need no GUI control and no headless
 // argument; they are always inserted automatically.
 //
+// Text tags: a bare tag like \company is replaced INLINE by text a function in
+// tablekinds.cpp returns (fixedTexts()). Same idea as a fixed table, but it
+// substitutes text in place (keeping surrounding text/formatting) instead of
+// inserting a whole table. Also automatic, no GUI/argument.
+//
 // Variants: a \variant{name|text 1|text 2|...} placeholder lets the user PICK
 // one of several wordings. `name` may be non-ASCII and contain spaces; the
 // options are the |-separated parts after it (taken verbatim). The GUI shows a
@@ -541,6 +546,48 @@ bool nextFixedTable(const std::string& s, size_t from, size_t& begin,
     return true;
 }
 
+// Find the next FIXED text tag (e.g. "\company") at or after `from`. These are
+// bare tags registered in docxform::fixedTexts(), each replaced inline by the
+// text its function returns. Same matching rules as nextFixedTable (earliest
+// position, longest tag on a tie, must end on a word boundary).
+bool nextFixedText(const std::string& s, size_t from, size_t& begin,
+                   size_t& end, std::string& tag) {
+    size_t best = std::string::npos, bestEnd = 0;
+    std::string bestTag;
+    for (const docxform::FixedText& ft : docxform::fixedTexts()) {
+        if (ft.tag.empty()) continue;
+        size_t p = s.find(ft.tag, from);
+        while (p != std::string::npos) {
+            size_t after = p + ft.tag.size();
+            char c = (after < s.size()) ? s[after] : '\0';
+            bool boundary =
+                !(std::isalnum(static_cast<unsigned char>(c)) || c == '_');
+            if (boundary) {
+                if (p < best || (p == best && ft.tag.size() > bestTag.size())) {
+                    best = p;
+                    bestEnd = after;
+                    bestTag = ft.tag;
+                }
+                break;
+            }
+            p = s.find(ft.tag, p + 1);
+        }
+    }
+    if (best == std::string::npos) return false;
+    begin = best;
+    end = bestEnd;
+    tag = bestTag;
+    return true;
+}
+
+// The replacement text for a fixed text tag (runs its function), or "" if the
+// tag is not registered.
+std::string fixedTextValue(const std::string& tag) {
+    for (const docxform::FixedText& ft : docxform::fixedTexts())
+        if (ft.tag == tag && ft.build) return ft.build(tag);
+    return std::string();
+}
+
 // Find the next \variant{name|opt1|opt2|...} at or after `from`. The name is the
 // text before the first '|' (trimmed of ASCII whitespace; it may contain spaces
 // and non-ASCII bytes, e.g. Russian). The options are the '|'-separated parts
@@ -719,9 +766,10 @@ std::string transformParagraph(
     }
     if (!verb.empty()) toks.push_back({false, std::move(verb), "", "", 0});
 
-    // Resolve every \var{...} / \variant{...} token to its replacement text up
-    // front. nextAnyToken yields tokens in increasing position, so `ms` stays
-    // sorted by begin. (Fixed table tags are handled in transformDocument.)
+    // Resolve every inline placeholder to its replacement text up front:
+    //   \var{...} / \variant{...} (form fields) and fixed text tags (\company, …,
+    // code-defined). (Fixed TABLE tags are handled in transformDocument.) Fixed
+    // text is not highlighted (it is code-defined content, like a table).
     struct M { size_t b, e; std::string repl; bool hl; };
     std::vector<M> ms;
     {
@@ -751,7 +799,30 @@ std::string transformParagraph(
             pos = tok.end;
         }
     }
+    {  // fixed text tags, e.g. \company -> its function's text
+        size_t pos = 0, b, e;
+        std::string tag;
+        while (nextFixedText(P, pos, b, e, tag)) {
+            ms.push_back({b, e, fixedTextValue(tag), false});
+            pos = e;
+        }
+    }
     if (ms.empty()) return inner;  // nothing to do: keep paragraph byte-for-byte
+
+    // Order all matches by position and drop any overlap (keep the earliest), so
+    // the two scans above combine into one sorted, non-overlapping list.
+    std::sort(ms.begin(), ms.end(),
+              [](const M& a, const M& b) { return a.b < b.b; });
+    {
+        std::vector<M> kept;
+        size_t lastEnd = 0;
+        for (M& m : ms)
+            if (kept.empty() || m.b >= lastEnd) {
+                lastEnd = m.e;
+                kept.push_back(std::move(m));
+            }
+        ms.swap(kept);
+    }
 
     std::vector<int> beginAt(P.size() + 1, -1), inAt(P.size() + 1, -1);
     for (size_t k = 0; k < ms.size(); ++k) {
@@ -993,10 +1064,12 @@ std::vector<FormBlock> collectFormBlocks(const std::string& xml) {
     return blocks;
 }
 
-// Collect the fixed-tag tables (\tablewage, ...) actually present in the
-// document, in first-seen order. Used by --vars so you can confirm a tag is
-// recognised. These need no user input — see addFixedTables.
-std::vector<std::string> collectFixedTables(const std::string& xml) {
+// Collect, in first-seen order, every fixed tag the given scanner finds across
+// the document. Used by --vars (with nextFixedTable / nextFixedText) so you can
+// confirm a tag is recognised. These tags need no user input.
+using TagScanner = bool (*)(const std::string&, size_t, size_t&, size_t&,
+                            std::string&);
+std::vector<std::string> collectTags(const std::string& xml, TagScanner scan) {
     std::vector<std::string> out;
     std::set<std::string> seen;
     size_t i = 0;
@@ -1010,7 +1083,7 @@ std::vector<std::string> collectFixedTables(const std::string& xml) {
             std::string P = concatParagraphText(xml.substr(e + 1, close - e - 1));
             size_t pos = 0, b, en;
             std::string tag;
-            while (nextFixedTable(P, pos, b, en, tag)) {
+            while (scan(P, pos, b, en, tag)) {
                 if (seen.insert(tag).second) out.push_back(tag);
                 pos = en;
             }
@@ -1316,7 +1389,8 @@ QWidget* showTemplateForm(QWidget* parent) {
 // Output (tab-separated):
 //   VAR\t<name>\t<paragraph context>
 //   VARIANT\t<name>\t<opt1>|<opt2>|...
-//   FIXEDTABLE\t<tag>               (always-inserted fixed tag, e.g. \tablewage)
+//   FIXEDTABLE\t<tag>               (always-inserted table tag, e.g. \tablewage)
+//   FIXEDTEXT\t<tag>                (inline text tag, e.g. \company)
 int listVars(int argc, char** argv) {
     if (argc < 3) {
         std::fprintf(stderr, "Usage: %s --vars <in.docx>\n", argv[0]);
@@ -1343,8 +1417,10 @@ int listVars(int argc, char** argv) {
         }
     }
     // Fixed-tag tables present in the document (always auto-inserted).
-    for (const auto& tag : collectFixedTables(xml))
+    for (const auto& tag : collectTags(xml, nextFixedTable))
         std::printf("FIXEDTABLE\t%s\n", tag.c_str());
+    for (const auto& tag : collectTags(xml, nextFixedText))
+        std::printf("FIXEDTEXT\t%s\n", tag.c_str());
     return 0;
 }
 
