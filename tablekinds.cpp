@@ -1,4 +1,4 @@
-// tablekinds.cpp - table kinds and OOXML table rendering for docxform.
+// tablekinds.cpp - table builders and OOXML table rendering for docxform.
 //
 // =====================================================================
 //  HOW TO ADD A NEW KIND OF TABLE
@@ -9,15 +9,14 @@
 //     - `rows` is a vector of rows; each row is a vector of cell strings.
 //     - You can hard-code the content, or COMPUTE it at runtime (loops,
 //       dates, data from your own app, etc.) - this function runs when the
-//       user presses "Создать документ".
-//     - The `name` argument is the {name} from \table{name} in the document,
-//       in case you want the content to depend on it.
-//  2. Register it by adding one entry to the vector returned by tableKinds():
-//         kinds.push_back({"my_id", "Название в списке", myBuilderFunction});
-//     `id` is a stable identifier (used by --render and code); `title` is what
-//     the user sees in the drop-down.
-//  3. Rebuild: `make docxform`. The new kind appears automatically in the GUI
-//     for every \table{...} placeholder.
+//       document is generated.
+//     - The `tag` argument is the fixed tag being filled (e.g. "\\tablewage"),
+//       in case one function serves several tags.
+//  2. Bind it to a tag by adding one entry to the vector returned by
+//     fixedTables():
+//         fixed.push_back({"\\mytable", myBuilderFunction});
+//     Now writing \mytable in a document always inserts that table.
+//  3. Rebuild: `make docxform`.
 //
 //  Cells are plain text (UTF-8). Newlines inside a cell are kept as separate
 //  lines. Borders and centered cell text are added automatically by
@@ -138,18 +137,6 @@ TableData wageReport(const std::string& /*tag*/) {
 
 }  // namespace
 
-// ---- The registry ---------------------------------------------------------
-// Add or remove entries here to change what the GUI offers.
-std::vector<TableKind> tableKinds() {
-    std::vector<TableKind> kinds;
-    kinds.push_back({"blank3x3",  "Пустая таблица 3×3",            blankGrid});
-    kinds.push_back({"price",     "Прайс-лист (пример)",            priceList});
-    kinds.push_back({"employees", "Сотрудники (пример)",            employees});
-    kinds.push_back({"schedule",  "График платежей (генерируется)", paymentSchedule});
-    kinds.push_back({"runtime",   "Строки из данных программы (демо)", runtimeTable});
-    return kinds;
-}
-
 // Runtime data store read by builders such as runtimeTable(). One process-wide
 // instance; your host application fills it before generating (see the header).
 std::map<std::string, std::vector<std::vector<std::string>>>& tableContext() {
@@ -157,20 +144,21 @@ std::map<std::string, std::vector<std::vector<std::string>>>& tableContext() {
     return ctx;
 }
 
-// ---- The fixed-tag registry -----------------------------------------------
-// Map bare tags like "\tablewage" to a specific kind id from tableKinds() above.
-// Wherever such a tag appears in a document, that table is inserted
-// automatically — no GUI drop-down, no headless argument. Add your own lines.
+// ---- The table registry ---------------------------------------------------
+// Each table in your documents has its own bare tag (e.g. "\tablewage") bound to
+// the builder that produces it. Writing the tag in a document always inserts
+// that table — no GUI, no headless argument. Add or change entries here.
 //
-// Steps to add a new fixed tag:
-//   1. Make sure the table kind exists in tableKinds() (note its id).
-//   2. Add a {tag, kindId} line below. The tag is the exact text you type in
-//      Word, including the leading backslash, e.g. "\\tablewage".
+// To add a new table: write a builder above, then add a {tag, builder} line.
+// The tag is the exact text you type in Word, with the leading backslash.
 std::vector<FixedTable> fixedTables() {
     std::vector<FixedTable> fixed;
-    fixed.push_back({"\\tableprice",   priceList});     // reuse an existing builder
-    fixed.push_back({"\\tablewage",    wageReport});    // logic dedicated to this tag
-    fixed.push_back({"\\tableruntime", runtimeTable});  // rows from tableContext()
+    fixed.push_back({"\\tableblank",     blankGrid});        // empty 3x3 grid
+    fixed.push_back({"\\tableprice",     priceList});        // sample price list
+    fixed.push_back({"\\tableemployees", employees});        // sample employees
+    fixed.push_back({"\\tableschedule",  paymentSchedule});  // generated in code
+    fixed.push_back({"\\tablewage",      wageReport});        // logic for this tag
+    fixed.push_back({"\\tableruntime",   runtimeTable});      // rows from tableContext()
     return fixed;
 }
 

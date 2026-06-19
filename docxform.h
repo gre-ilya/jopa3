@@ -2,8 +2,8 @@
 //
 // This header lets you embed the docxform window inside another Qt application:
 // you give it the path of a .docx template (with \var{...} variables and
-// optional \variant{...} / \table{name} markers) and get back a ready-to-show
-// widget that asks the user for the values and writes the filled .docx itself.
+// optional \variant{...} choices and fixed table tags like \tablewage) and get
+// back a ready-to-show widget that asks for the values and writes the .docx.
 //
 // To reuse it, link docxform.cpp (built WITH the macro DOCXFORM_NO_MAIN, so its
 // own main() is dropped) together with tablekinds.cpp, and include this header:

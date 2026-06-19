@@ -7,8 +7,8 @@
 //
 // It is intentionally self-contained (it does not depend on the rest of
 // docxform), so the whole thing can be reused as a module inside another Qt
-// application: link tablekinds.cpp, call tableKinds() to list the kinds and
-// buildTableXml() to turn a chosen kind's data into OOXML.
+// application: link tablekinds.cpp, define the tables you need in fixedTables()
+// and use buildTableXml() to turn a table's data into OOXML.
 
 #ifndef DOCXFORM_TABLEKINDS_H
 #define DOCXFORM_TABLEKINDS_H
@@ -28,56 +28,39 @@ struct TableData {
     std::vector<std::vector<std::string>> rows;   // body rows (cells, UTF-8)
 };
 
-// A selectable kind of table, shown to the user in a drop-down in the GUI.
-struct TableKind {
-    std::string id;     // stable identifier (not shown in the GUI)
-    std::string title;  // label shown in the GUI drop-down
-
-    // Produces the table content. `name` is the {name} taken from the
-    // \table{name} placeholder in the document, so a kind can adapt its content
-    // to the placeholder it is filling (or ignore it). This is called at
-    // generation time, so you may compute rows on the fly here.
-    std::function<TableData(const std::string& name)> build;
-};
-
-// THE REGISTRY. Returns every table kind the GUI offers. Edit the body of this
-// function (in tablekinds.cpp) to add, remove or change kinds.
-std::vector<TableKind> tableKinds();
-
 // A "fixed" table tag: a bare placeholder (no braces, e.g. "\\tablewage") bound
 // DIRECTLY to its own logic. Wherever the tag appears it is always replaced by
-// whatever its `build` returns — no drop-down in the GUI, no argument in
-// headless mode. Use it to run specific logic for a specific tag.
+// whatever its `build` returns — no GUI, no headless argument. Each kind of
+// table in your documents gets its own tag here.
 struct FixedTable {
     std::string tag;  // the literal placeholder in the document, e.g. "\\tablewage"
 
     // The logic that produces THIS tag's table. Called at generation time with
     // the tag itself (so one function can serve several tags if you want).
     // Return the table content: keep `headers` fixed and compute `rows` however
-    // you like. You can reuse a builder from tableKinds() or write a function
-    // dedicated to this one tag.
+    // you like.
     std::function<TableData(const std::string& tag)> build;
 };
 
-// THE FIXED-TAG REGISTRY. Returns every fixed tag and the builder it always runs.
-// Edit the body of this function (in tablekinds.cpp) to add your own, e.g. bind
-// "\\tablewage" to your own buildWage() function. Tags must start with '\\', be
-// distinct, and not be a prefix of one another or of "\\table{".
+// THE TABLE REGISTRY. Returns every fixed tag and the builder it always runs.
+// This is the CUSTOMIZATION POINT: edit the body of this function (in
+// tablekinds.cpp) to add your own, e.g. bind "\\tablewage" to your buildWage().
+// Tags must start with '\\' and be distinct (and not a prefix of one another).
 std::vector<FixedTable> fixedTables();
 
 // Runtime data your application feeds to table builders. A build() function runs
 // at GENERATION time, so it can return DIFFERENT rows every time depending on
 // what your program put here — while the columns (headers) stay fixed. Key it by
-// the placeholder/tag name the table fills (the `name` build() receives, e.g.
-// "\\tablewage" for a fixed tag) so each table reads its own rows.
+// the tag the table fills (the `tag` build() receives, e.g. "\\tablewage") so
+// each table reads its own rows.
 //
 // From your host application, before generating, just fill it:
 //     docxform::tableContext()["\\tablewage"] = {
 //         {"Иванов И. И.", "100000"},
 //         {"Петров П. П.", "90000"},
 //     };
-// and have that tag's build() copy `tableContext()[name]` into TableData::rows
-// (see the "runtime" demo kind in tablekinds.cpp). Returns a reference to a
+// and have that tag's build() copy `tableContext()[tag]` into TableData::rows
+// (see the runtimeTable() demo in tablekinds.cpp). Returns a reference to a
 // process-wide store; change its value type here if you need richer data.
 std::map<std::string, std::vector<std::vector<std::string>>>& tableContext();
 

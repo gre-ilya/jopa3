@@ -22,18 +22,18 @@
 // matched span is rebuilt. Images, tables, tabs and other formatting are
 // preserved; placeholders inside tables are templated too.
 //
-// Tables: a \table{name} placeholder is replaced by a generated <w:tbl>. The
-// available table kinds (columns, rows, content) live in tablekinds.cpp - that
-// is where you add new ones. The GUI shows a drop-down per \table{name} to pick
-// which kind to insert.
+// Tables: a fixed tag like \tablewage is replaced by a generated <w:tbl>. Each
+// table has its own bare tag bound to a builder in tablekinds.cpp - that is
+// where you add new ones. Fixed tags need no GUI control and no headless
+// argument; they are always inserted automatically.
 //
 // Variants: a \variant{name|text 1|text 2|...} placeholder lets the user PICK
 // one of several wordings. `name` may be non-ASCII and contain spaces; the
 // options are the |-separated parts after it (taken verbatim). The GUI shows a
 // drop-down per variant and substitutes the chosen text (highlighted yellow).
 //
-// The form lists variables, variants and tables in the SAME order they appear
-// in the document (interleaved, not grouped by type).
+// The form lists variables and variants in the SAME order they appear in the
+// document (interleaved, not grouped by type).
 //
 // Build:  make docxform
 //   or:   g++ -O2 -std=c++17 -fPIC docxform.cpp tablekinds.cpp -o docxform
@@ -505,30 +505,6 @@ bool nextVarPlaceholder(const std::string& s, size_t from, size_t& begin,
     return false;
 }
 
-// Find the next \table{name} at or after `from`. name is everything up to the
-// closing '}', trimmed. On success sets begin/end (range of the whole token).
-bool nextTablePlaceholder(const std::string& s, size_t from, size_t& begin,
-                          size_t& end, std::string& name) {
-    size_t p = from;
-    while ((p = s.find("\\table{", p)) != std::string::npos) {
-        size_t close = s.find('}', p + 7);
-        if (close == std::string::npos) return false;
-        std::string raw = s.substr(p + 7, close - (p + 7));
-        size_t a = 0, b = raw.size();
-        while (a < b && std::isspace(static_cast<unsigned char>(raw[a]))) ++a;
-        while (b > a && std::isspace(static_cast<unsigned char>(raw[b - 1]))) --b;
-        std::string nm = raw.substr(a, b - a);
-        if (!nm.empty()) {
-            begin = p;
-            end = close + 1;
-            name = nm;
-            return true;
-        }
-        p = close + 1;  // empty name; keep scanning
-    }
-    return false;
-}
-
 // Find the next FIXED table tag (e.g. "\tablewage") at or after `from`. These
 // are bare tags registered in docxform::fixedTables(), each always mapped to one
 // table kind. On success sets begin/end (range of the tag) and `tag` (the
@@ -610,11 +586,12 @@ bool nextVariantPlaceholder(const std::string& s, size_t from, size_t& begin,
 
 // ---- Unified token model --------------------------------------------------
 //
-// A template has three kinds of fillable placeholders. To present them in the
-// GUI (and list them headless) in DOCUMENT ORDER, we scan a paragraph for the
-// earliest token of any kind and walk forward.
+// A template has two kinds of fillable placeholders. To present them in the GUI
+// (and list them headless) in DOCUMENT ORDER, we scan a paragraph for the
+// earliest token of any kind and walk forward. (Fixed table tags need no input
+// and are handled separately, at the paragraph level.)
 
-enum class FieldKind { Var, Variant, Table };
+enum class FieldKind { Var, Variant };
 
 struct Token {
     FieldKind kind;
@@ -625,9 +602,9 @@ struct Token {
     std::vector<std::string> options;  // Variant only
 };
 
-// Find the earliest of \var{...}, \variant{...} or \table{name} at or after
-// `from`. The three syntaxes never overlap, so picking the smallest begin is
-// unambiguous. Returns false when no token remains.
+// Find the earliest of \var{...} or \variant{...} at or after `from`. The two
+// syntaxes never overlap, so picking the smallest begin is unambiguous. Returns
+// false when no token remains.
 bool nextAnyToken(const std::string& s, size_t from, Token& tok) {
     size_t best = std::string::npos;
     Token chosen;
@@ -648,10 +625,6 @@ bool nextAnyToken(const std::string& s, size_t from, Token& tok) {
             best = b;
             chosen = {FieldKind::Variant, b, e, vn, "", std::move(opts)};
         }
-    }
-    if (nextTablePlaceholder(s, from, b, e, nm) && b < best) {
-        best = b;
-        chosen = {FieldKind::Table, b, e, nm, "", {}};
     }
 
     if (best == std::string::npos) return false;
@@ -747,9 +720,8 @@ std::string transformParagraph(
     if (!verb.empty()) toks.push_back({false, std::move(verb), "", "", 0});
 
     // Resolve every \var{...} / \variant{...} token to its replacement text up
-    // front. \table{...} tokens are handled at the paragraph level (see
-    // transformDocument) and are left untouched here. nextAnyToken yields tokens
-    // in increasing position, so `ms` stays sorted by begin.
+    // front. nextAnyToken yields tokens in increasing position, so `ms` stays
+    // sorted by begin. (Fixed table tags are handled in transformDocument.)
     struct M { size_t b, e; std::string repl; bool hl; };
     std::vector<M> ms;
     {
@@ -776,7 +748,6 @@ std::string transformParagraph(
                                                : tok.options.front());
                 ms.push_back({tok.begin, tok.end, std::move(val), true});
             }
-            // FieldKind::Table: leave the literal \table{...} in place.
             pos = tok.end;
         }
     }
@@ -839,11 +810,10 @@ void addFixedTables(std::map<std::string, docxform::TableData>& out) {
 }
 
 // Walk document.xml and, for every <w:p>:
-//   - if (at body level) it holds a table placeholder (a fixed tag like
-//     \tablewage, or a \table{name} the user selected), replace the WHOLE
-//     paragraph with the generated <w:tbl>;
+//   - if (at body level) it holds a fixed table tag (\tablewage, …), replace the
+//     WHOLE paragraph with the generated <w:tbl>;
 //   - otherwise substitute its \var{...} variables as usual.
-// `tables` maps a placeholder name to the table content chosen for it;
+// `tables` maps each fixed tag to its table content (see addFixedTables);
 // `variantChoices` maps a \variant{...} name to its chosen option text.
 // When `highlight` is true the substituted values are highlighted yellow (as
 // before); when false they are inserted without any highlight.
@@ -877,34 +847,15 @@ std::string transformDocument(
             if (close == std::string::npos) break;
             std::string inner = xml.substr(e + 1, close - e - 1);
 
-            // Does this paragraph contain a table placeholder? (body only) Both
-            // fixed tags (\tablewage, keyed by the tag) and \table{name} (keyed
-            // by the name) are handled, in document order; each looks its content
-            // up in `tables`.
+            // Does this paragraph contain a fixed table tag (\tablewage, …)?
+            // (body only) Each tag's content is looked up in `tables` by the tag.
             std::string tablesXml;
             if (tableDepth == 0 && !tables.empty()) {
                 std::string P = concatParagraphText(inner);
-                size_t pos = 0;
-                for (;;) {
-                    size_t fb, fe;
-                    std::string ftag;
-                    bool haveFixed = nextFixedTable(P, pos, fb, fe, ftag);
-                    size_t tb, te;
-                    std::string tname;
-                    bool haveTable = nextTablePlaceholder(P, pos, tb, te, tname);
-
-                    std::string key;
-                    size_t advance;
-                    if (haveFixed && (!haveTable || fb <= tb)) {
-                        key = ftag;
-                        advance = fe;
-                    } else if (haveTable) {
-                        key = tname;
-                        advance = te;
-                    } else {
-                        break;
-                    }
-                    auto it = tables.find(key);
+                size_t pos = 0, fb, fe;
+                std::string ftag;
+                while (nextFixedTable(P, pos, fb, fe, ftag)) {
+                    auto it = tables.find(ftag);
                     if (it != tables.end()) {
                         // Two <w:tbl> in a row must be separated by a paragraph
                         // (OOXML would otherwise merge them), but no trailing
@@ -912,7 +863,7 @@ std::string transformDocument(
                         if (!tablesXml.empty()) tablesXml += "<w:p/>";
                         tablesXml += docxform::buildTableXml(it->second);
                     }
-                    pos = advance;
+                    pos = fe;
                 }
             }
 
@@ -942,8 +893,8 @@ std::string transformDocument(
     return out;
 }
 
-// A fillable item discovered in a template: a \var{...} variable, a \variant{...}
-// choice, or a \table{...} placeholder.
+// A fillable item discovered in a template: a \var{...} variable or a
+// \variant{...} choice.
 struct FormField {
     FieldKind kind;
     std::string name;
@@ -993,17 +944,17 @@ std::map<std::string, std::string> firstVarInfos(const std::string& xml) {
 }
 
 // Walk the document paragraph by paragraph and collect fillable items in the
-// exact order they appear (variables, variants and tables interleaved). Each
-// item is listed once, under the paragraph of its first occurrence; paragraphs
-// without any new item are skipped. This single ordered list drives both the GUI
-// layout and the headless listing, so they always mirror the document.
+// exact order they appear (variables and variants interleaved). Each item is
+// listed once, under the paragraph of its first occurrence; paragraphs without
+// any new item are skipped. This single ordered list drives both the GUI layout
+// and the headless listing, so they always mirror the document.
 std::vector<FormBlock> collectFormBlocks(const std::string& xml) {
     std::vector<FormBlock> blocks;
     // A \var hint may be written on any occurrence of the name; resolve each
     // name's hint up front so the (deduplicated) field gets it regardless of
     // which occurrence comes first.
     std::map<std::string, std::string> varInfos = firstVarInfos(xml);
-    std::set<std::string> seenVar, seenVariant, seenTable;
+    std::set<std::string> seenVar, seenVariant;
     size_t i = 0;
     while ((i = xml.find('<', i)) != std::string::npos) {
         if (i + 1 < xml.size() && xml[i + 1] != '/' && tagIs(xml, i, "p")) {
@@ -1017,13 +968,9 @@ std::vector<FormBlock> collectFormBlocks(const std::string& xml) {
             Token tok;
             size_t pos = 0;
             while (nextAnyToken(P, pos, tok)) {
-                bool isNew = false;
-                if (tok.kind == FieldKind::Var)
-                    isNew = seenVar.insert(tok.name).second;
-                else if (tok.kind == FieldKind::Variant)
-                    isNew = seenVariant.insert(tok.name).second;
-                else
-                    isNew = seenTable.insert(tok.name).second;
+                bool isNew = (tok.kind == FieldKind::Var)
+                                 ? seenVar.insert(tok.name).second
+                                 : seenVariant.insert(tok.name).second;
                 if (isNew) {
                     std::string info;
                     if (tok.kind == FieldKind::Var) {
@@ -1080,10 +1027,10 @@ std::vector<std::string> collectFixedTables(const std::string& xml) {
 // ---- GUI ------------------------------------------------------------------
 
 // A QWidget-only window (no Q_OBJECT, so no moc is needed): one control per
-// fillable item — a text field for a \var{...} variable, a drop-down for a
-// \variant{...} and a drop-down for a \table{...} — laid out in document order,
-// plus a button that writes the filled .docx. The widget is self-contained, so
-// it can be embedded in another Qt application as-is.
+// fillable item — a text field for a \var{...} variable and a drop-down for a
+// \variant{...} — laid out in document order, plus a button that writes the
+// filled .docx. The widget is self-contained, so it can be embedded in another
+// Qt application as-is.
 class FormWindow : public QWidget {
 public:
     FormWindow(const QString& path, std::string zip, std::string xml,
@@ -1091,28 +1038,24 @@ public:
         : path_(path),
           zip_(std::move(zip)),
           xml_(std::move(xml)),
-          blocks_(std::move(blocks)),
-          kinds_(docxform::tableKinds()) {
+          blocks_(std::move(blocks)) {
         setWindowTitle(QString::fromUtf8("docxform — шаблонизатор .docx"));
         resize(560, 540);
 
-        int nVar = 0, nVariant = 0, nTable = 0;
+        int nVar = 0, nVariant = 0;
         for (const FormBlock& blk : blocks_)
             for (const FormField& f : blk.fields) {
                 if (f.kind == FieldKind::Var) ++nVar;
-                else if (f.kind == FieldKind::Variant) ++nVariant;
-                else ++nTable;
+                else ++nVariant;
             }
 
         auto* root = new QVBoxLayout(this);
 
         QString head =
-            QString::fromUtf8(
-                "Шаблон: %1\nПеременных: %2,  вариантов: %3,  таблиц: %4")
+            QString::fromUtf8("Шаблон: %1\nПеременных: %2,  вариантов: %3")
                 .arg(QFileInfo(path_).fileName())
                 .arg(nVar)
-                .arg(nVariant)
-                .arg(nTable);
+                .arg(nVariant);
         auto* header = new QLabel(head, this);
         header->setWordWrap(true);
         root->addWidget(header);
@@ -1123,8 +1066,7 @@ public:
 
         // One block per paragraph, in document order. The paragraph (its items
         // highlighted) is shown once, then a control per item in the order the
-        // items appear in the paragraph — so the whole form mirrors the document
-        // instead of grouping all variables, then all tables.
+        // items appear in the paragraph — so the whole form mirrors the document.
         for (const FormBlock& blk : blocks_) {
             std::set<std::string> active;
             for (const FormField& f : blk.fields) active.insert(f.name);
@@ -1146,30 +1088,21 @@ public:
                     edit->setToolTip(varHintHtml(f.name, f.info));
                     form->addRow(qname, edit);
                     edits_.emplace_back(f.name, edit);
-                } else if (f.kind == FieldKind::Variant) {
+                } else {  // Variant
                     auto* combo = new QComboBox(container);
                     for (const std::string& opt : f.options)
                         combo->addItem(QString::fromStdString(opt));
                     combo->setToolTip(variantHintHtml(f.name));
                     form->addRow(qname, combo);
                     variantCtls_.push_back({f.name, combo, f.options});
-                } else {  // Table
-                    auto* combo = new QComboBox(container);
-                    combo->addItem(QString::fromUtf8("— не вставлять —"));  // 0
-                    for (const docxform::TableKind& k : kinds_)
-                        combo->addItem(QString::fromStdString(k.title));
-                    if (!kinds_.empty()) combo->setCurrentIndex(1);  // first kind
-                    combo->setToolTip(tableHintHtml(f.name));
-                    form->addRow(qname, combo);
-                    tableCombos_.emplace_back(f.name, combo);
                 }
             }
         }
 
         if (blocks_.empty()) {
             form->addRow(new QLabel(
-                QString::fromUtf8("В документе нет плейсхолдеров \\var{…}, "
-                                  "\\variant{…} или \\table{…}."),
+                QString::fromUtf8("В документе нет плейсхолдеров \\var{…} "
+                                  "или \\variant{…}."),
                 container));
         }
 
@@ -1197,7 +1130,7 @@ private:
     // Render a paragraph as rich text for a block's context line. Items in
     // `active` (those with a control right below this line) are highlighted; the
     // same placeholder introduced by an earlier block is greyed. Variants get a
-    // ▾ marker; tables show a badge (the paragraph becomes the table).
+    // ▾ marker.
     static QString contextHtml(const std::string& text,
                                const std::set<std::string>& active) {
         QString html;
@@ -1208,24 +1141,16 @@ private:
                         .toHtmlEscaped();
             QString name = QString::fromStdString(tok.name).toHtmlEscaped();
             bool on = active.count(tok.name) != 0;
-            if (tok.kind == FieldKind::Table) {
-                QString badge = QString::fromUtf8("таблица: ") + name;
-                html += on ? ("<span style=\"background-color:#d0e0ff;"
-                              "font-weight:bold;\">" + badge + "</span>")
-                           : ("<span style=\"color:#999;\">[" + badge + "]</span>");
-            } else {
-                QString shown = name;
-                if (tok.kind == FieldKind::Variant)
-                    shown += QString::fromUtf8(" \xe2\x96\xbe");  // ▾
-                if (on)
-                    html += "<span style=\"background-color:#fff3a0;"
-                            "font-weight:bold;\">" + shown + "</span>";
-                else if (tok.kind == FieldKind::Variant)
-                    html += "<span style=\"color:#999;\">" + shown + "</span>";
-                else
-                    html += "<span style=\"color:#999;\">\\var{" + name +
-                            "}</span>";
-            }
+            QString shown = name;
+            if (tok.kind == FieldKind::Variant)
+                shown += QString::fromUtf8(" \xe2\x96\xbe");  // ▾
+            if (on)
+                html += "<span style=\"background-color:#fff3a0;"
+                        "font-weight:bold;\">" + shown + "</span>";
+            else if (tok.kind == FieldKind::Variant)
+                html += "<span style=\"color:#999;\">" + shown + "</span>";
+            else
+                html += "<span style=\"color:#999;\">\\var{" + name + "}</span>";
             cur = tok.end;
             pos = tok.end;
         }
@@ -1268,15 +1193,6 @@ private:
             .arg(qname);
     }
 
-    // Tooltip for a \table{...} drop-down.
-    static QString tableHintHtml(const std::string& name) {
-        QString qname = QString::fromStdString(name).toHtmlEscaped();
-        return QString::fromUtf8(
-                   "<b>%1</b> — выберите вид таблицы для вставки на место "
-                   "\\table{%1}, либо «— не вставлять —».")
-            .arg(qname);
-    }
-
     void onGenerate() {
         std::map<std::string, std::string> values;
         for (const auto& kv : edits_)
@@ -1290,16 +1206,8 @@ private:
                 variantChoices[vc.name] = vc.options[sel];
         }
 
-        // Build the chosen table for each \table{name} (index 0 = skip).
+        // Fixed table tags (\tablewage, ...) are always inserted, no control.
         std::map<std::string, docxform::TableData> tableData;
-        for (const auto& kv : tableCombos_) {
-            int sel = kv.second->currentIndex();
-            if (sel >= 1 && sel - 1 < static_cast<int>(kinds_.size())) {
-                const docxform::TableKind& kind = kinds_[sel - 1];
-                if (kind.build) tableData[kv.first] = kind.build(kv.first);
-            }
-        }
-        // Fixed tags (\tablewage, ...) are always inserted, no control needed.
         addFixedTables(tableData);
 
         QString suggested = QFileInfo(path_).absoluteDir().filePath(
@@ -1347,11 +1255,9 @@ private:
     std::string zip_;
     std::string xml_;
     std::vector<FormBlock> blocks_;  // fillable items in document order
-    std::vector<docxform::TableKind> kinds_;
     QCheckBox* highlightCheck_ = nullptr;  // highlight inserted text yellow?
-    std::vector<std::pair<std::string, QLineEdit*>> edits_;        // \var{...}
-    std::vector<VariantCtl> variantCtls_;                          // \variant{}
-    std::vector<std::pair<std::string, QComboBox*>> tableCombos_;  // \table{}
+    std::vector<std::pair<std::string, QLineEdit*>> edits_;  // \var{...}
+    std::vector<VariantCtl> variantCtls_;                    // \variant{}
 };
 
 }  // namespace
@@ -1410,7 +1316,6 @@ QWidget* showTemplateForm(QWidget* parent) {
 // Output (tab-separated):
 //   VAR\t<name>\t<paragraph context>
 //   VARIANT\t<name>\t<opt1>|<opt2>|...
-//   TABLE\t<name>
 //   FIXEDTABLE\t<tag>               (always-inserted fixed tag, e.g. \tablewage)
 int listVars(int argc, char** argv) {
     if (argc < 3) {
@@ -1427,15 +1332,13 @@ int listVars(int argc, char** argv) {
         for (const auto& f : blk.fields) {
             if (f.kind == FieldKind::Var) {
                 std::printf("VAR\t%s\t%s\n", f.name.c_str(), blk.text.c_str());
-            } else if (f.kind == FieldKind::Variant) {
+            } else {  // Variant
                 std::string joined;
                 for (size_t k = 0; k < f.options.size(); ++k) {
                     if (k) joined += "|";
                     joined += f.options[k];
                 }
                 std::printf("VARIANT\t%s\t%s\n", f.name.c_str(), joined.c_str());
-            } else {
-                std::printf("TABLE\t%s\n", f.name.c_str());
             }
         }
     }
@@ -1447,19 +1350,17 @@ int listVars(int argc, char** argv) {
 
 // Headless mode (no GUI), handy for scripting and testing:
 //   docxform --render <in.docx> <out.docx>
-//       NAME=VALUE ... [~VARIANT=choice ...] [+TABLE=kind_id ...] [--no-highlight]
-// A "+name=kind_id" argument fills the \table{name} placeholder with the table
-// kind whose id is kind_id (see tableKinds() in tablekinds.cpp). A
-// "~name=choice" argument picks a \variant{name|...}: `choice` may be a 1-based
+//       NAME=VALUE ... [~VARIANT=choice ...] [--no-highlight]
+// A "~name=choice" argument picks a \variant{name|...}: `choice` may be a 1-based
 // option index or the option text verbatim. Variant names with spaces need
-// quoting, e.g. "~обращение к клиенту=1". By default inserted values are
-// highlighted yellow; pass --no-highlight to insert them without any highlight.
+// quoting, e.g. "~обращение к клиенту=1". Fixed table tags (\tablewage, …) are
+// always inserted automatically, no argument needed. By default inserted values
+// are highlighted yellow; pass --no-highlight to insert them without highlight.
 int renderHeadless(int argc, char** argv) {
     if (argc < 4) {
         std::fprintf(stderr,
                      "Usage: %s --render <in.docx> <out.docx> "
-                     "[NAME=VALUE ...] [~VARIANT=choice ...] "
-                     "[+TABLE=kind_id ...] [--no-highlight]\n",
+                     "[NAME=VALUE ...] [~VARIANT=choice ...] [--no-highlight]\n",
                      argv[0]);
         return 1;
     }
@@ -1473,7 +1374,6 @@ int renderHeadless(int argc, char** argv) {
         std::fprintf(stderr, "Error: '%s' is not a valid .docx\n", argv[2]);
         return 1;
     }
-    std::vector<docxform::TableKind> kinds = docxform::tableKinds();
     std::map<std::string, std::string> values;
     std::map<std::string, std::string> variantChoices;
     std::map<std::string, docxform::TableData> tableData;
@@ -1494,15 +1394,7 @@ int renderHeadless(int argc, char** argv) {
         }
         size_t eq = a.find('=');
         if (eq == std::string::npos) continue;
-        if (!a.empty() && a[0] == '+') {  // table selection: +name=kind_id
-            std::string name = a.substr(1, eq - 1);
-            std::string kindId = a.substr(eq + 1);
-            for (const auto& k : kinds)
-                if (k.id == kindId && k.build) {
-                    tableData[name] = k.build(name);
-                    break;
-                }
-        } else if (!a.empty() && a[0] == '~') {  // variant: ~name=index|text
+        if (!a.empty() && a[0] == '~') {  // variant: ~name=index|text
             std::string name = a.substr(1, eq - 1);
             std::string val = a.substr(eq + 1);
             std::string chosen = val;  // default: treat as literal option text
