@@ -65,11 +65,13 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QShowEvent>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -1197,6 +1199,27 @@ public:
         generate->setDefault(true);
         root->addWidget(generate);
         connect(generate, &QPushButton::clicked, this, [this] { onGenerate(); });
+    }
+
+protected:
+    // Close on Esc (a plain QWidget, unlike a QDialog, does not do this itself).
+    // The event only reaches here if a focused child did not use it — so Esc
+    // still closes an open drop-down popup first, then the window.
+    void keyPressEvent(QKeyEvent* e) override {
+        if (e->key() == Qt::Key_Escape) {
+            close();
+            return;
+        }
+        QWidget::keyPressEvent(e);
+    }
+
+    // Bring the window to the front and give it focus whenever it is shown, so it
+    // does not get lost behind the host application's other windows (handy when
+    // the caller only does show() after openTemplateForm).
+    void showEvent(QShowEvent* e) override {
+        QWidget::showEvent(e);
+        raise();
+        activateWindow();
     }
 
 private:
