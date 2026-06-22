@@ -61,17 +61,16 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDialog>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
-#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
-#include <QShowEvent>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -1101,12 +1100,12 @@ std::vector<std::string> collectTags(const std::string& xml, TagScanner scan) {
 
 // ---- GUI ------------------------------------------------------------------
 
-// A QWidget-only window (no Q_OBJECT, so no moc is needed): one control per
-// fillable item — a text field for a \var{...} variable and a drop-down for a
-// \variant{...} — laid out in document order, plus a button that writes the
-// filled .docx. The widget is self-contained, so it can be embedded in another
-// Qt application as-is.
-class FormWindow : public QWidget {
+// A QDialog (no Q_OBJECT, so no moc is needed): one control per fillable item —
+// a text field for a \var{...} variable and a drop-down for a \variant{...} —
+// laid out in document order, plus a button that writes the filled .docx. Being
+// a QDialog, it closes on Esc and stacks above its parent on its own. It is
+// self-contained, so it can be embedded in another Qt application as-is.
+class FormWindow : public QDialog {
 public:
     FormWindow(const QString& path, std::string zip, std::string xml,
                std::vector<FormBlock> blocks)
@@ -1199,27 +1198,6 @@ public:
         generate->setDefault(true);
         root->addWidget(generate);
         connect(generate, &QPushButton::clicked, this, [this] { onGenerate(); });
-    }
-
-protected:
-    // Close on Esc (a plain QWidget, unlike a QDialog, does not do this itself).
-    // The event only reaches here if a focused child did not use it — so Esc
-    // still closes an open drop-down popup first, then the window.
-    void keyPressEvent(QKeyEvent* e) override {
-        if (e->key() == Qt::Key_Escape) {
-            close();
-            return;
-        }
-        QWidget::keyPressEvent(e);
-    }
-
-    // Bring the window to the front and give it focus whenever it is shown, so it
-    // does not get lost behind the host application's other windows (handy when
-    // the caller only does show() after openTemplateForm).
-    void showEvent(QShowEvent* e) override {
-        QWidget::showEvent(e);
-        raise();
-        activateWindow();
     }
 
 private:
