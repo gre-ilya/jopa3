@@ -136,6 +136,20 @@ TableData wageReport(const std::string& /*tag*/) {
     return t;
 }
 
+// 7) Rows with DIFFERENT numbers of columns (merged cells via column spans). The
+//    first row has 3 cells, the second has 5; cell 2 of row 1 spans columns 2-3
+//    and cell 3 spans columns 4-5 (cell 1 sits over column 1). The grid has 5
+//    columns; spans say how many each cell covers.
+TableData spanDemo(const std::string& /*tag*/) {
+    TableData t;
+    t.headers = {"Группа A", "Группа B", "Группа C"};
+    t.headerSpans = {1, 2, 2};  // 1 + 2 + 2 = 5 grid columns
+    t.rows = {
+        {"a", "b1", "b2", "c1", "c2"},  // 5 cells, each spans 1
+    };
+    return t;
+}
+
 // ---- Demo TEXT builders ---------------------------------------------------
 // Each returns the text that its tag expands to (see fixedTexts() below).
 
@@ -190,6 +204,7 @@ std::vector<FixedTable> fixedTables() {
     fixed.push_back({"\\tableschedule",  paymentSchedule});  // generated in code
     fixed.push_back({"\\tablewage",      wageReport});        // logic for this tag
     fixed.push_back({"\\tableruntime",   runtimeTable});      // rows from tableContext()
+    fixed.push_back({"\\tablespan",      spanDemo});          // merged cells / spans
     return fixed;
 }
 
@@ -211,27 +226,45 @@ std::vector<FixedText> fixedTexts() {
 // ---- OOXML rendering ------------------------------------------------------
 
 std::string buildTableXml(const TableData& table) {
-    // Column count = widest of the header and all rows (at least 1).
-    size_t cols = table.headers.size();
-    for (const auto& r : table.rows) cols = std::max(cols, r.size());
-    if (cols == 0) cols = 1;
+    // The span of one cell (how many grid columns it occupies): the matching
+    // entry in `spans` if present and positive, otherwise 1.
+    auto spanOf = [](const std::vector<int>& spans, size_t c) {
+        return (c < spans.size() && spans[c] > 0) ? spans[c] : 1;
+    };
+    // Total grid columns a row occupies = sum of its cells' spans.
+    auto rowTotal = [&](const std::vector<std::string>& cells,
+                        const std::vector<int>& spans) {
+        int total = 0;
+        for (size_t c = 0; c < cells.size(); ++c) total += spanOf(spans, c);
+        return total;
+    };
 
-    // Equal column widths, independent of content: the table spans a fixed total
-    // width (~full text area of a default page) split evenly between the columns.
-    // Combined with a fixed table layout below, Word keeps every column the same
-    // width regardless of what each cell contains.
+    // Grid column count = widest row's total span (header included), at least 1.
+    // Without any spans this is just the widest row's cell count (as before).
+    int gridCols = rowTotal(table.headers, table.headerSpans);
+    for (size_t r = 0; r < table.rows.size(); ++r) {
+        const std::vector<int>& sp =
+            r < table.rowSpans.size() ? table.rowSpans[r] : std::vector<int>();
+        gridCols = std::max(gridCols, rowTotal(table.rows[r], sp));
+    }
+    if (gridCols < 1) gridCols = 1;
+
+    // Equal grid-column widths, independent of content: the table spans a fixed
+    // total width split evenly. With a fixed table layout below, Word keeps every
+    // grid column the same width; a cell spanning N columns is N times as wide.
     const int kTotalDxa = 9360;  // ~6.5" in twips; close to a default page's text width
-    int colDxa = static_cast<int>(kTotalDxa / cols);
+    int colDxa = kTotalDxa / gridCols;
     if (colDxa < 1) colDxa = 1;
-    const int tableDxa = colDxa * static_cast<int>(cols);
+    const int tableDxa = colDxa * gridCols;
     const std::string colW = std::to_string(colDxa);
 
-    auto cell = [&](const std::string& text) {
-        // Every cell gets the same preferred width (so all columns come out
-        // equal) and is centered both horizontally and vertically. No bold and
-        // no shaded header — header cells look the same as the rest.
-        std::string tcpr = "<w:tcPr><w:tcW w:w=\"" + colW +
-                           "\" w:type=\"dxa\"/><w:vAlign w:val=\"center\"/></w:tcPr>";
+    // One cell occupying `span` grid columns: width = span*colDxa, plus a
+    // <w:gridSpan> when it spans more than one. Centered horizontally/vertically.
+    auto cell = [&](const std::string& text, int span) {
+        std::string tcpr = "<w:tcPr><w:tcW w:w=\"" +
+                           std::to_string(colDxa * span) + "\" w:type=\"dxa\"/>";
+        if (span > 1) tcpr += "<w:gridSpan w:val=\"" + std::to_string(span) + "\"/>";
+        tcpr += "<w:vAlign w:val=\"center\"/></w:tcPr>";
         // Split the cell text on newlines into separate (centered) paragraphs.
         std::string body;
         size_t start = 0;
@@ -249,10 +282,17 @@ std::string buildTableXml(const TableData& table) {
         return "<w:tc>" + tcpr + body + "</w:tc>";
     };
 
-    auto row = [&](const std::vector<std::string>& cells) {
+    auto row = [&](const std::vector<std::string>& cells,
+                   const std::vector<int>& spans) {
         std::string r = "<w:tr>";
-        for (size_t c = 0; c < cols; ++c)
-            r += cell(c < cells.size() ? cells[c] : std::string());
+        int used = 0;
+        for (size_t c = 0; c < cells.size(); ++c) {
+            int span = spanOf(spans, c);
+            r += cell(cells[c], span);
+            used += span;
+        }
+        // Pad short rows to the full grid width with empty single-column cells.
+        for (; used < gridCols; ++used) r += cell(std::string(), 1);
         r += "</w:tr>";
         return r;
     };
@@ -269,14 +309,17 @@ std::string buildTableXml(const TableData& table) {
     x += "</w:tblPr>";
 
     x += "<w:tblGrid>";
-    for (size_t c = 0; c < cols; ++c)
+    for (int c = 0; c < gridCols; ++c)
         x += "<w:gridCol w:w=\"" + colW + "\"/>";
     x += "</w:tblGrid>";
 
-    if (!table.headers.empty()) x += row(table.headers);
-    for (const auto& r : table.rows) x += row(r);
+    if (!table.headers.empty()) x += row(table.headers, table.headerSpans);
+    for (size_t r = 0; r < table.rows.size(); ++r)
+        x += row(table.rows[r],
+                 r < table.rowSpans.size() ? table.rowSpans[r]
+                                           : std::vector<int>());
     if (table.headers.empty() && table.rows.empty())
-        x += row({});  // guarantee at least one row (valid OOXML)
+        x += row({}, {});  // guarantee at least one row (valid OOXML)
 
     x += "</w:tbl>";
     return x;

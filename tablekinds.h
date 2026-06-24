@@ -28,6 +28,20 @@ namespace docxform {
 struct TableData {
     std::vector<std::string> headers;             // column titles (top row)
     std::vector<std::vector<std::string>> rows;   // body rows (cells, UTF-8)
+
+    // Optional horizontal column spans (merged cells), for tables whose rows have
+    // DIFFERENT numbers of columns. `headerSpans` is parallel to `headers`,
+    // `rowSpans[i]` is parallel to `rows[i]`; a cell's span is how many columns of
+    // the underlying grid it occupies (missing / <= 0 means 1). The grid has as
+    // many columns as the widest row's total span. Leave both empty for an
+    // ordinary equal-column table.
+    //
+    // Example — a 3-cell row over a 5-cell row (2nd cell spans cols 2-3, 3rd spans
+    // cols 4-5):
+    //     t.headers = {"A", "B", "C"};   t.headerSpans = {1, 2, 2};
+    //     t.rows    = {{"1","2","3","4","5"}};   // rowSpans omitted -> all 1
+    std::vector<int> headerSpans;            // parallel to `headers` (optional)
+    std::vector<std::vector<int>> rowSpans;  // parallel to `rows`    (optional)
 };
 
 // A "fixed" table tag: a bare placeholder (no braces, e.g. "\\tablewage") bound
