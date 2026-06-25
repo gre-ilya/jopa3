@@ -249,20 +249,33 @@ std::string buildTableXml(const TableData& table) {
     }
     if (gridCols < 1) gridCols = 1;
 
-    // Equal grid-column widths, independent of content: the table spans a fixed
-    // total width split evenly. With a fixed table layout below, Word keeps every
-    // grid column the same width; a cell spanning N columns is N times as wide.
+    // Equal grid-column widths by default; or use `colWidths` as relative weights
+    // to distribute a fixed total page width unevenly. With a fixed table layout
+    // below, Word keeps these widths; a cell spanning N columns is as wide as
+    // those N columns combined.
     const int kTotalDxa = 9360;  // ~6.5" in twips; close to a default page's text width
-    int colDxa = kTotalDxa / gridCols;
-    if (colDxa < 1) colDxa = 1;
-    const int tableDxa = colDxa * gridCols;
-    const std::string colW = std::to_string(colDxa);
+    auto weightAt = [&](int c) {
+        return (c < static_cast<int>(table.colWidths.size()) &&
+                table.colWidths[c] > 0)
+                   ? table.colWidths[c]
+                   : 1;
+    };
+    long sumW = 0;
+    for (int c = 0; c < gridCols; ++c) sumW += weightAt(c);
+    std::vector<int> colDxaAt(gridCols);  // width (twips) of each grid column
+    int tableDxa = 0;
+    for (int c = 0; c < gridCols; ++c) {
+        int w = static_cast<int>(static_cast<long>(kTotalDxa) * weightAt(c) / sumW);
+        if (w < 1) w = 1;
+        colDxaAt[c] = w;
+        tableDxa += w;
+    }
 
-    // One cell occupying `span` grid columns: width = span*colDxa, plus a
-    // <w:gridSpan> when it spans more than one. Centered horizontally/vertically.
-    auto cell = [&](const std::string& text, int span) {
-        std::string tcpr = "<w:tcPr><w:tcW w:w=\"" +
-                           std::to_string(colDxa * span) + "\" w:type=\"dxa\"/>";
+    // One cell: `widthDxa` wide, occupying `span` grid columns (a <w:gridSpan>
+    // when > 1). Centered horizontally and vertically.
+    auto cell = [&](const std::string& text, int widthDxa, int span) {
+        std::string tcpr = "<w:tcPr><w:tcW w:w=\"" + std::to_string(widthDxa) +
+                           "\" w:type=\"dxa\"/>";
         if (span > 1) tcpr += "<w:gridSpan w:val=\"" + std::to_string(span) + "\"/>";
         tcpr += "<w:vAlign w:val=\"center\"/></w:tcPr>";
         // Split the cell text on newlines into separate (centered) paragraphs.
@@ -282,17 +295,24 @@ std::string buildTableXml(const TableData& table) {
         return "<w:tc>" + tcpr + body + "</w:tc>";
     };
 
+    // Sum of grid-column widths over [from, from+span).
+    auto spanWidth = [&](int from, int span) {
+        int w = 0;
+        for (int k = 0; k < span && from + k < gridCols; ++k) w += colDxaAt[from + k];
+        return w < 1 ? 1 : w;
+    };
+
     auto row = [&](const std::vector<std::string>& cells,
                    const std::vector<int>& spans) {
         std::string r = "<w:tr>";
         int used = 0;
         for (size_t c = 0; c < cells.size(); ++c) {
             int span = spanOf(spans, c);
-            r += cell(cells[c], span);
+            r += cell(cells[c], spanWidth(used, span), span);
             used += span;
         }
         // Pad short rows to the full grid width with empty single-column cells.
-        for (; used < gridCols; ++used) r += cell(std::string(), 1);
+        for (; used < gridCols; ++used) r += cell(std::string(), colDxaAt[used], 1);
         r += "</w:tr>";
         return r;
     };
@@ -310,7 +330,7 @@ std::string buildTableXml(const TableData& table) {
 
     x += "<w:tblGrid>";
     for (int c = 0; c < gridCols; ++c)
-        x += "<w:gridCol w:w=\"" + colW + "\"/>";
+        x += "<w:gridCol w:w=\"" + std::to_string(colDxaAt[c]) + "\"/>";
     x += "</w:tblGrid>";
 
     if (!table.headers.empty()) x += row(table.headers, table.headerSpans);

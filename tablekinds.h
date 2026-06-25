@@ -42,6 +42,13 @@ struct TableData {
     //     t.rows    = {{"1","2","3","4","5"}};   // rowSpans omitted -> all 1
     std::vector<int> headerSpans;            // parallel to `headers` (optional)
     std::vector<std::vector<int>> rowSpans;  // parallel to `rows`    (optional)
+
+    // Optional widths of the underlying GRID columns, as RELATIVE weights (any
+    // positive numbers, e.g. {2,1,1} = first column twice as wide as the others).
+    // One entry per grid column; missing / <= 0 entries default to weight 1.
+    // Empty = all columns equal. A cell that spans several columns is as wide as
+    // their widths combined. The table always fills the same total page width.
+    std::vector<int> colWidths;
 };
 
 // A "fixed" table tag: a bare placeholder (no braces, e.g. "\\tablewage") bound
