@@ -225,7 +225,7 @@ std::vector<FixedText> fixedTexts() {
 
 // ---- OOXML rendering ------------------------------------------------------
 
-std::string buildTableXml(const TableData& table) {
+std::string buildTableXml(const TableData& table, bool highlight) {
     // The span of one cell (how many grid columns it occupies): the matching
     // entry in `spans` if present and positive, otherwise 1.
     auto spanOf = [](const std::vector<int>& spans, size_t c) {
@@ -279,12 +279,17 @@ std::string buildTableXml(const TableData& table) {
         if (span > 1) tcpr += "<w:gridSpan w:val=\"" + std::to_string(span) + "\"/>";
         tcpr += "<w:vAlign w:val=\"center\"/></w:tcPr>";
         // Split the cell text on newlines into separate (centered) paragraphs.
+        // When `highlight` is on, each run carries a yellow highlight, matching
+        // the highlighted text inserted elsewhere in the document.
+        const std::string rpr =
+            highlight ? "<w:rPr><w:highlight w:val=\"yellow\"/></w:rPr>"
+                      : std::string();
         std::string body;
         size_t start = 0;
         for (size_t i = 0; i <= text.size(); ++i) {
             if (i == text.size() || text[i] == '\n') {
                 std::string line = text.substr(start, i - start);
-                body += "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r>"
+                body += "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r>" + rpr +
                         "<w:t xml:space=\"preserve\">" + xmlEscape(line) +
                         "</w:t></w:r></w:p>";
                 start = i + 1;

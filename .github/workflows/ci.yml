@@ -34,7 +34,7 @@ jobs:
       - name: Smoke test (headless --render)
         run: |
           python3 ci/make_sample.py sample.docx
-          ./docxform --render sample.docx out.docx "name=Test"
+          ./docxform --render sample.docx out.docx
           python3 ci/check_render.py out.docx
 
   windows-clang:
@@ -73,5 +73,5 @@ jobs:
       - name: Smoke test (headless --render)
         run: |
           python ci/make_sample.py sample.docx
-          ./docxform.exe --render sample.docx out.docx "name=Test"
+          ./docxform.exe --render sample.docx out.docx
           python ci/check_render.py out.docx

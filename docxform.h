@@ -1,9 +1,10 @@
-// docxform.h - public API of the docxform GUI templater.
+// docxform.h - public API of the docxform .docx templater.
 //
-// This header lets you embed the docxform window inside another Qt application:
-// you give it the path of a .docx template (with \var{...} variables and
-// optional \variant{...} choices and fixed table tags like \tablewage) and get
-// back a ready-to-show widget that asks for the values and writes the .docx.
+// The module fills a .docx template from YOUR OWN tags (defined in
+// tablekinds.cpp): fixed table tags like \tablewage and inline text tags like
+// \company. There is no interactive per-variable form — calling the module pops
+// a file chooser for the template, then immediately a save dialog for the output,
+// and writes the generated document.
 //
 // To reuse it, link docxform.cpp (built WITH the macro DOCXFORM_NO_MAIN, so its
 // own main() is dropped) together with tablekinds.cpp, and include this header:
@@ -12,14 +13,11 @@
 //
 //     #include "docxform.h"
 //     ...
-//     QString err;
-//     if (QWidget* form = docxform::openTemplateForm("contract.docx", &err))
-//         form->show();                 // a QApplication must already exist
-//     else
-//         /* show err to the user */;
+//     // Highlight the inserted text and table contents yellow? -> bool argument.
+//     docxform::fillTemplate(/*highlight=*/true, this);   // a QApplication must exist
 //
-// Everything table-related stays in tablekinds.h / tablekinds.cpp, so you can
-// customise the offered tables exactly as in the standalone tool.
+// Everything table/text-related stays in tablekinds.h / tablekinds.cpp, so you
+// customise the tags exactly as in the standalone tool.
 
 #ifndef DOCXFORM_H
 #define DOCXFORM_H
@@ -29,40 +27,29 @@ class QWidget;
 
 namespace docxform {
 
-// Build the templating form for the .docx at `templatePath` and return it as a
-// top-level QWidget. The caller OWNS the returned widget: call show() on it (or
-// give it a parent, see below) and delete it when done — setting
-// Qt::WA_DeleteOnClose is a convenient way to tie it to the window's lifetime.
+// THE MODULE'S MAIN ENTRY POINT. Runs the whole interactive flow:
+//   1. pops a file chooser for the .docx template;
+//   2. immediately pops a save dialog for the output path;
+//   3. expands every fixed table/text tag and writes the generated .docx.
 //
-// A QApplication (or QGuiApplication-based app) must already exist before this
-// is called, exactly as for any other Qt widget.
+// `highlight` decides whether the inserted text AND the generated table contents
+// are highlighted yellow (true) or inserted without any highlight (false) — it is
+// the single knob the host application controls.
 //
-// On failure (file missing, or not a valid .docx) the function returns nullptr
-// and, if `error` is non-null, stores a human-readable message in it. It never
-// pops up a dialog itself, so the embedding program stays in control of how
-// errors are shown.
-//
-// If `parent` is non-null the window is parented to it (kept as a separate
-// top-level window, but owned by the parent for stacking and lifetime).
-QWidget* openTemplateForm(const QString& templatePath, QString* error = nullptr,
-                          QWidget* parent = nullptr);
+// Returns true if a document was written, false if the user cancelled either
+// dialog or an error occurred (an error is shown to the user via a message box).
+// A QApplication must already exist. `parent`, if given, owns the dialogs for
+// stacking and lifetime.
+bool fillTemplate(bool highlight, QWidget* parent = nullptr);
 
-// Convenience entry point for embedding: reproduce the WHOLE standalone GUI flow
-// from a host application with one call. It pops a file chooser for a .docx
-// template, builds the form and shows it as a top-level window (deleted on
-// close); on error it shows a message box itself. Returns the shown window, or
-// nullptr if the user cancelled the chooser or opening failed.
-//
-// This is exactly what the standalone program does when launched without a file
-// argument, so you can wire it straight to a button's clicked() slot to start
-// the module "as if launched on its own":
-//
-//     connect(myButton, &QPushButton::clicked, this,
-//             [this]{ docxform::showTemplateForm(this); });
-//
-// A QApplication must already exist (your app has one). `parent`, if given, owns
-// the dialog and the window for stacking and lifetime.
-QWidget* showTemplateForm(QWidget* parent = nullptr);
+// Headless core used by fillTemplate() (and the --render command line): read the
+// template at `templatePath`, expand every fixed table/text tag, and write the
+// result to `outPath`. `highlight` highlights the inserted text and table
+// contents yellow when true. Shows no dialogs. On failure returns false and, if
+// `error` is non-null, stores a human-readable message in it. Handy for scripting
+// or when the host already knows both paths.
+bool renderTemplate(const QString& templatePath, const QString& outPath,
+                    bool highlight, QString* error = nullptr);
 
 }  // namespace docxform
 

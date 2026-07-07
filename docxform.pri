@@ -6,7 +6,7 @@
 # It adds the docxform + tablekinds sources/headers, requires the Qt Widgets
 # module, links zlib and defines DOCXFORM_NO_MAIN so docxform's own main() is
 # dropped (your application keeps its own). After including it, call
-# docxform::openTemplateForm() from your code (see docxform.h).
+# docxform::fillTemplate() from your code (see docxform.h).
 #
 # Cross-platform: builds with qmake on Linux, macOS and Windows. The code itself
 # uses only standard C++17, Qt and zlib (no OS-specific headers); the ZIP/.docx

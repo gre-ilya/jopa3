@@ -28,7 +28,8 @@ def para(text):
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "sample.docx"
-    body = para("Client: \\var{name}") + para("\\tablewage")
+    # \company is an inline text tag; \tablewage is a fixed table tag.
+    body = para("Company: \\company") + para("\\tablewage")
     doc = HEAD + body + TAIL
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", CT)

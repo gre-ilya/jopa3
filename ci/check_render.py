@@ -12,7 +12,10 @@ xml = zipfile.ZipFile(sys.argv[1]).read("word/document.xml").decode("utf-8")
 vis = html.unescape("".join(re.findall(r"<w:t(?:\s[^>]*)?>(.*?)</w:t>", xml, re.S)))
 print("visible:", vis)
 
-assert "Client: Test" in vis, "variable not substituted: %r" % vis
+assert "Company: ООО «Ромашка»" in vis, "text tag \\company not substituted: %r" % vis
 assert "Сотрудник" in vis, "fixed table \\tablewage not inserted: %r" % vis
 assert "<w:tbl" in xml, "no table element generated"
+# Rendered with the default highlight on: inserted text and table contents
+# must both carry a yellow highlight.
+assert '<w:highlight w:val="yellow"/>' in xml, "inserted text/tables not highlighted"
 print("smoke OK")

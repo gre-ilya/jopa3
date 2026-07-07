@@ -74,7 +74,7 @@ std::vector<FixedTable> fixedTables();
 // A custom TEXT tag: a bare placeholder (e.g. "\\company") replaced INLINE by
 // text your code returns. Unlike a fixed table (which replaces a whole
 // paragraph), a text tag substitutes just the tag and keeps the surrounding text
-// and run formatting — like a code-defined \var. No GUI, no headless argument.
+// and run formatting. No GUI, no headless argument.
 struct FixedText {
     std::string tag;  // the literal placeholder in the document, e.g. "\\company"
 
@@ -116,8 +116,9 @@ std::map<std::string, std::vector<std::vector<std::string>>>& tableContext();
 std::map<std::string, std::string>& textContext();
 
 // Render a TableData as an OOXML <w:tbl>...</w:tbl> fragment (with visible
-// borders and centered cell text). Reusable on its own.
-std::string buildTableXml(const TableData& table);
+// borders and centered cell text). Reusable on its own. When `highlight` is true
+// every cell's text is highlighted yellow (to match highlighted inserted text).
+std::string buildTableXml(const TableData& table, bool highlight = false);
 
 }  // namespace docxform
 

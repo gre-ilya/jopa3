@@ -8,8 +8,10 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QString err;
     // Exercise the public API so both entry points must compile and link.
-    QWidget* w = docxform::openTemplateForm(QString::fromUtf8("none.docx"), &err);
-    (void)w;
-    (void)&docxform::showTemplateForm;  // force showTemplateForm to be linked
+    bool ok = docxform::renderTemplate(QString::fromUtf8("none.docx"),
+                                       QString::fromUtf8("out.docx"),
+                                       /*highlight=*/true, &err);
+    (void)ok;
+    (void)&docxform::fillTemplate;  // force fillTemplate to be linked
     return 0;
 }
