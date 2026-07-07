@@ -12,6 +12,9 @@ int main(int argc, char** argv) {
                                        QString::fromUtf8("out.docx"),
                                        /*highlight=*/true, &err);
     (void)ok;
-    (void)&docxform::fillTemplate;  // force fillTemplate to be linked
+    // Force both fillTemplate overloads to be linked (disambiguated by cast).
+    (void)static_cast<bool (*)(bool, QWidget*)>(&docxform::fillTemplate);
+    (void)static_cast<bool (*)(const QString&, bool, QWidget*)>(
+        &docxform::fillTemplate);
     return 0;
 }

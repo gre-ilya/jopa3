@@ -29,6 +29,7 @@
 //   or:   g++ -O2 -std=c++17 -fPIC docxform.cpp tablekinds.cpp -o docxform
 //             $(pkg-config --cflags --libs Qt5Widgets) -lz
 // Usage:  ./docxform            (asks for the template, then the output path)
+//         ./docxform template.docx    (skips the chooser; asks only where to save)
 //         ./docxform --render <in.docx> <out.docx> [--no-highlight]  (headless)
 
 #include <algorithm>
@@ -831,14 +832,12 @@ bool renderTemplate(const QString& templatePath, const QString& outPath,
     return true;
 }
 
-bool fillTemplate(bool highlight, QWidget* parent) {
-    QString templatePath = QFileDialog::getOpenFileName(
-        parent, QString::fromUtf8("Выберите шаблон .docx"), QString(),
-        QString::fromUtf8("Документ Word (*.docx)"));
-    if (templatePath.isEmpty()) return false;  // user cancelled the chooser
+bool fillTemplate(const QString& templatePath, bool highlight,
+                  QWidget* parent) {
+    if (templatePath.isEmpty()) return false;  // nothing to fill
 
-    // Immediately ask where to save the generated document (no intermediate
-    // window). Default to "<template>_filled.docx" next to the template.
+    // Ask only where to save the generated document (the template is already
+    // known). Default to "<template>_filled.docx" next to the template.
     QString suggested = QFileInfo(templatePath).absoluteDir().filePath(
         QFileInfo(templatePath).completeBaseName() + "_filled.docx");
     QString outPath = QFileDialog::getSaveFileName(
@@ -856,6 +855,16 @@ bool fillTemplate(bool highlight, QWidget* parent) {
         parent, QString::fromUtf8("Готово"),
         QString::fromUtf8("Документ сохранён:\n%1").arg(outPath));
     return true;
+}
+
+bool fillTemplate(bool highlight, QWidget* parent) {
+    QString templatePath = QFileDialog::getOpenFileName(
+        parent, QString::fromUtf8("Выберите шаблон .docx"), QString(),
+        QString::fromUtf8("Документ Word (*.docx)"));
+    if (templatePath.isEmpty()) return false;  // user cancelled the chooser
+    // Immediately ask where to save the generated document (no intermediate
+    // window) and render — same as passing the path in directly.
+    return fillTemplate(templatePath, highlight, parent);
 }
 
 }  // namespace docxform
@@ -913,10 +922,11 @@ int renderHeadless(int argc, char** argv) {
 // The standalone executable's entry point. Define DOCXFORM_NO_MAIN when reusing
 // docxform.cpp as a library inside another program (which has its own main()).
 //
-// GUI:  ./docxform [--no-highlight]
-//   Asks for the template, then the output path, and writes the result. Inserted
-//   text and table contents are highlighted yellow unless --no-highlight is given
-//   (this is the `highlight` bool passed to docxform::fillTemplate()).
+// GUI:  ./docxform [template.docx] [--no-highlight]
+//   Without a path: asks for the template, then the output path. With a
+//   template.docx path: skips the template chooser and asks only where to save.
+//   Inserted text and table contents are highlighted yellow unless
+//   --no-highlight is given (the `highlight` bool passed to fillTemplate()).
 #ifndef DOCXFORM_NO_MAIN
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "--render") == 0)
@@ -927,10 +937,16 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
 
     bool highlight = true;  // highlight inserted text/tables yellow by default
-    for (int i = 1; i < argc; ++i)
+    QString templatePath;   // a non-flag argument = template to fill directly
+    for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--no-highlight") == 0) highlight = false;
+        else if (templatePath.isEmpty()) templatePath = QFile::decodeName(argv[i]);
+    }
 
-    docxform::fillTemplate(highlight);  // open template -> save dialog -> render
+    if (templatePath.isEmpty())
+        docxform::fillTemplate(highlight);  // open template -> save -> render
+    else
+        docxform::fillTemplate(templatePath, highlight);  // save -> render
     return 0;
 }
 #endif  // DOCXFORM_NO_MAIN

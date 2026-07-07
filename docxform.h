@@ -42,6 +42,14 @@ namespace docxform {
 // stacking and lifetime.
 bool fillTemplate(bool highlight, QWidget* parent = nullptr);
 
+// Same as above, but the template is passed in directly (`templatePath`), so the
+// template chooser is SKIPPED — only the save dialog is shown before generating.
+// Use this when your application already knows which template to fill. Returns
+// false if `templatePath` is empty, the user cancelled the save dialog, or an
+// error occurred (shown via a message box). A QApplication must already exist.
+bool fillTemplate(const QString& templatePath, bool highlight,
+                  QWidget* parent = nullptr);
+
 // Headless core used by fillTemplate() (and the --render command line): read the
 // template at `templatePath`, expand every fixed table/text tag, and write the
 // result to `outPath`. `highlight` highlights the inserted text and table
