@@ -22,6 +22,7 @@
 #ifndef DOCXFORM_H
 #define DOCXFORM_H
 
+class QFile;
 class QString;
 class QWidget;
 
@@ -48,6 +49,15 @@ bool fillTemplate(bool highlight, QWidget* parent = nullptr);
 // false if `templatePath` is empty, the user cancelled the save dialog, or an
 // error occurred (shown via a message box). A QApplication must already exist.
 bool fillTemplate(const QString& templatePath, bool highlight,
+                  QWidget* parent = nullptr);
+
+// Same as the path overload, but the template is passed as a QFile the caller
+// already holds — its bytes are read directly (the handle is opened read-only if
+// needed and restored to its prior state), so the template need not be addressed
+// by a path string. The template chooser is SKIPPED; only the save dialog is
+// shown (its default name comes from the QFile's own file name, if any). Returns
+// false if the file can't be read, the user cancelled, or an error occurred.
+bool fillTemplate(QFile& templateFile, bool highlight,
                   QWidget* parent = nullptr);
 
 // Headless core used by fillTemplate() (and the --render command line): read the

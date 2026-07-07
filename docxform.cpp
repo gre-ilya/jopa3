@@ -46,6 +46,7 @@
 #include <zlib.h>
 
 #include <QApplication>
+#include <QDir>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -69,6 +70,24 @@ bool readWholeFile(const QString& path, std::string& out) {
     if (!f.open(QIODevice::ReadOnly)) return false;
     const QByteArray data = f.readAll();
     out.assign(data.constData(), static_cast<size_t>(data.size()));
+    return true;
+}
+
+// Read a whole file straight from a QFile the caller already holds (so it can be
+// filled from an existing handle without going through a path string). Opens it
+// read-only if it is not open yet, reads from the beginning, and restores the
+// original open/closed state afterwards.
+bool readWholeQFile(QFile& f, std::string& out) {
+    const bool wasOpen = f.isOpen();
+    if (!wasOpen && !f.open(QIODevice::ReadOnly)) return false;
+    if (!(f.openMode() & QIODevice::ReadOnly)) {  // opened, but not readable
+        if (!wasOpen) f.close();
+        return false;
+    }
+    if (!f.seek(0)) { if (!wasOpen) f.close(); return false; }
+    const QByteArray data = f.readAll();
+    out.assign(data.constData(), static_cast<size_t>(data.size()));
+    if (!wasOpen) f.close();
     return true;
 }
 
@@ -789,7 +808,71 @@ std::vector<std::string> collectTags(const std::string& xml, TagScanner scan) {
     return out;
 }
 
+// ---- Rendering core -------------------------------------------------------
+
+// Transform a whole .docx held in memory (`zip`, the raw archive bytes) into the
+// generated .docx bytes (`out`): expand every fixed table/text tag, highlighting
+// the inserted text and table contents yellow when `highlight` is on. On failure
+// returns false and, if `error` is non-null, stores a message. This is the one
+// place the actual generation happens; every public entry point funnels here.
+bool renderZipBytes(const std::string& zip, bool highlight, std::string& out,
+                    QString* error) {
+    auto fail = [&](const QString& msg) -> bool {
+        if (error) *error = msg;
+        return false;
+    };
+
+    std::string xml;
+    if (!extractZipMember(zip, "word/document.xml", xml))
+        return fail(QString::fromUtf8(
+            "Это не похоже на .docx (нет word/document.xml)."));
+
+    std::vector<std::pair<std::string, std::string>> members;
+    if (!listZipMembers(zip, members))
+        return fail(QString::fromUtf8("Не удалось разобрать исходный .docx."));
+
+    // Fixed table tags (\tablewage, ...) are always inserted, no user input.
+    std::map<std::string, docxform::TableData> tableData;
+    addFixedTables(tableData);
+
+    std::string newXml = transformDocument(xml, tableData, highlight);
+    for (auto& m : members)
+        if (m.first == "word/document.xml") m.second = newXml;
+
+    out = buildZipStored(members);
+    return true;
+}
+
 // ---- GUI ------------------------------------------------------------------
+
+// Shared by the fillTemplate() overloads: given the template .docx bytes and a
+// suggested output name, ask WHERE to save, render and report success/failure via
+// message boxes. Returns true only if a file was written.
+bool saveAndRenderZip(const std::string& zip, const QString& suggested,
+                      bool highlight, QWidget* parent) {
+    QString outPath = QFileDialog::getSaveFileName(
+        parent, QString::fromUtf8("Сохранить документ"), suggested,
+        QString::fromUtf8("Документ Word (*.docx)"));
+    if (outPath.isEmpty()) return false;  // user cancelled the save dialog
+    if (!outPath.endsWith(".docx", Qt::CaseInsensitive)) outPath += ".docx";
+
+    std::string bytes;
+    QString err;
+    if (!renderZipBytes(zip, highlight, bytes, &err)) {
+        QMessageBox::critical(parent, QString::fromUtf8("Ошибка"), err);
+        return false;
+    }
+    if (!writeWholeFile(outPath, bytes)) {
+        QMessageBox::critical(
+            parent, QString::fromUtf8("Ошибка"),
+            QString::fromUtf8("Не удалось записать файл:\n%1").arg(outPath));
+        return false;
+    }
+    QMessageBox::information(
+        parent, QString::fromUtf8("Готово"),
+        QString::fromUtf8("Документ сохранён:\n%1").arg(outPath));
+    return true;
+}
 
 }  // namespace
 
@@ -808,53 +891,52 @@ bool renderTemplate(const QString& templatePath, const QString& outPath,
     if (!readWholeFile(templatePath, zip))
         return fail(QString::fromUtf8("Не удалось открыть файл:\n%1")
                         .arg(templatePath));
-    std::string xml;
-    if (!extractZipMember(zip, "word/document.xml", xml))
-        return fail(QString::fromUtf8(
-            "Это не похоже на .docx (нет word/document.xml)."));
-
-    std::vector<std::pair<std::string, std::string>> members;
-    if (!listZipMembers(zip, members))
-        return fail(QString::fromUtf8("Не удалось разобрать исходный .docx."));
-
-    // Fixed table tags (\tablewage, ...) are always inserted, no user input.
-    std::map<std::string, docxform::TableData> tableData;
-    addFixedTables(tableData);
-
-    std::string newXml = transformDocument(xml, tableData, highlight);
-    for (auto& m : members)
-        if (m.first == "word/document.xml") m.second = newXml;
-
-    std::string bytes = buildZipStored(members);
+    std::string bytes;
+    if (!renderZipBytes(zip, highlight, bytes, error)) return false;
     if (!writeWholeFile(outPath, bytes))
         return fail(
             QString::fromUtf8("Не удалось записать файл:\n%1").arg(outPath));
     return true;
 }
 
+// Default output name "<base>_filled.docx" next to `templateName` (a path or
+// file name; may be empty, in which case a generic name is used).
+static QString suggestedOutput(const QString& templateName) {
+    QFileInfo info(templateName);
+    QString base = info.completeBaseName();
+    if (base.isEmpty()) base = QString::fromUtf8("document");
+    QString dir = info.absolutePath();
+    return dir.isEmpty() ? base + "_filled.docx"
+                         : QDir(dir).filePath(base + "_filled.docx");
+}
+
 bool fillTemplate(const QString& templatePath, bool highlight,
                   QWidget* parent) {
     if (templatePath.isEmpty()) return false;  // nothing to fill
-
-    // Ask only where to save the generated document (the template is already
-    // known). Default to "<template>_filled.docx" next to the template.
-    QString suggested = QFileInfo(templatePath).absoluteDir().filePath(
-        QFileInfo(templatePath).completeBaseName() + "_filled.docx");
-    QString outPath = QFileDialog::getSaveFileName(
-        parent, QString::fromUtf8("Сохранить документ"), suggested,
-        QString::fromUtf8("Документ Word (*.docx)"));
-    if (outPath.isEmpty()) return false;  // user cancelled the save dialog
-    if (!outPath.endsWith(".docx", Qt::CaseInsensitive)) outPath += ".docx";
-
-    QString err;
-    if (!renderTemplate(templatePath, outPath, highlight, &err)) {
-        QMessageBox::critical(parent, QString::fromUtf8("Ошибка"), err);
+    std::string zip;
+    if (!readWholeFile(templatePath, zip)) {
+        QMessageBox::critical(
+            parent, QString::fromUtf8("Ошибка"),
+            QString::fromUtf8("Не удалось открыть файл:\n%1").arg(templatePath));
         return false;
     }
-    QMessageBox::information(
-        parent, QString::fromUtf8("Готово"),
-        QString::fromUtf8("Документ сохранён:\n%1").arg(outPath));
-    return true;
+    // Ask only where to save (the template is already known), then render.
+    return saveAndRenderZip(zip, suggestedOutput(templatePath), highlight,
+                            parent);
+}
+
+bool fillTemplate(QFile& templateFile, bool highlight, QWidget* parent) {
+    std::string zip;
+    if (!readWholeQFile(templateFile, zip)) {
+        QMessageBox::critical(
+            parent, QString::fromUtf8("Ошибка"),
+            QString::fromUtf8("Не удалось прочитать шаблон .docx."));
+        return false;
+    }
+    // Suggest a name from the QFile's own file name (empty for handles with no
+    // path). Ask only where to save, then render.
+    return saveAndRenderZip(zip, suggestedOutput(templateFile.fileName()),
+                            highlight, parent);
 }
 
 bool fillTemplate(bool highlight, QWidget* parent) {

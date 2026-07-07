@@ -324,6 +324,13 @@ namespace docxform {
     bool fillTemplate(const QString& templatePath, bool highlight,
                       QWidget* parent = nullptr);
 
+    // То же, но шаблон передаётся сразу как QFile (уже открытый вами или ещё нет
+    // — модуль откроет на чтение сам и вернёт исходное состояние). Диалог выбора
+    // шаблона ПРОПУСКАЕТСЯ, показывается только диалог сохранения (имя по
+    // умолчанию берётся из имени файла QFile, если оно есть).
+    bool fillTemplate(QFile& templateFile, bool highlight,
+                      QWidget* parent = nullptr);
+
     // «Тихое» ядро (его же зовёт fillTemplate и режим --render): прочитать
     // шаблон, раскрыть все теги и записать результат — БЕЗ диалогов. `highlight`
     // так же выделяет вставленный текст и таблицы. При ошибке возвращает false и
@@ -352,6 +359,15 @@ connect(myButton, &QPushButton::clicked, this, [this] {
 
 ```cpp
 docxform::fillTemplate("contract.docx", /*highlight=*/true, this);
+```
+
+Либо передайте **сам `QFile`**, если он у вас уже есть (например, открытый
+дескриптор): модуль прочитает его напрямую, диалог выбора шаблона так же
+пропускается:
+
+```cpp
+QFile tpl("contract.docx");
+docxform::fillTemplate(tpl, /*highlight=*/true, this);
 ```
 
 Если известны **оба** пути (пакетная обработка, без единого диалога) — вызывайте
