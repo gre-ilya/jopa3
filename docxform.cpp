@@ -551,13 +551,37 @@ std::string concatParagraphText(const std::string& inner) {
     return P;
 }
 
+// The paragraph's leading <w:pPr>...</w:pPr> (its properties: alignment, style,
+// spacing), or "" if it has none. Copied into every EXTRA paragraph created when
+// a substituted value contains a '\n', so those new paragraphs keep the original
+// paragraph's formatting instead of falling back to the default.
+std::string leadingParaProps(const std::string& inner) {
+    size_t i = 0;
+    while (i < inner.size() && inner[i] != '<') ++i;
+    if (i >= inner.size() || inner[i + 1] == '/' || !tagIs(inner, i, "pPr"))
+        return std::string();
+    size_t open = inner.find('>', i);
+    if (open == std::string::npos) return std::string();
+    if (inner[open - 1] == '/') return inner.substr(i, open + 1 - i);  // <w:pPr/>
+    size_t close = findClose(inner, open, "pPr");
+    if (close == std::string::npos) return std::string();
+    size_t closeGt = inner.find('>', close);
+    if (closeGt == std::string::npos) return std::string();
+    return inner.substr(i, closeGt + 1 - i);
+}
+
 // ---- Document transformation ----------------------------------------------
 
 // Rebuild one paragraph's inner XML, replacing each fixed text tag (\company, …,
 // matched across the paragraph's merged simple-run text) with the text its
 // builder returns. When `highlight` is true the inserted text is highlighted
-// yellow; otherwise it is inserted without any highlight.
+// yellow; otherwise it is inserted without any highlight. A '\n' in a substituted
+// value becomes a real PARAGRAPH break: the paragraph is closed and a new one
+// (carrying the same <w:pPr>) is opened, so multi-line values turn into separate
+// paragraphs.
 std::string transformParagraph(const std::string& inner, bool highlight) {
+    // Paragraph properties, copied into the extra paragraphs a '\n' creates.
+    const std::string pPr = leadingParaProps(inner);
     struct Tok {
         bool simple;
         std::string raw;   // verbatim XML (non-simple content)
@@ -656,21 +680,25 @@ std::string transformParagraph(const std::string& inner, bool highlight) {
             r = "<w:rPr>" + rpr + "<w:highlight w:val=\"yellow\"/></w:rPr>";
         else if (!rpr.empty())
             r = "<w:rPr>" + rpr + "</w:rPr>";
-        // Split the text on '\n' and put a <w:br/> between the pieces, so a
-        // newline in a substituted value becomes a real line break in Word (a
-        // raw '\n' inside a single <w:t> is otherwise ignored). Everything stays
-        // in ONE run, keeping the run's formatting/highlight.
-        std::string body;
+        // Split the text on '\n' into SEPARATE PARAGRAPHS: at each '\n' close the
+        // current paragraph and open a new one carrying the same <w:pPr>, so a
+        // newline in a substituted value becomes a real paragraph break in Word.
+        // (The opening <w:p ...> of the first paragraph and the closing </w:p> of
+        // the last are added by transformDocument around this whole result.)
+        std::string result;
         size_t start = 0;
+        bool first = true;
         for (size_t i = 0; i <= text.size(); ++i) {
             if (i == text.size() || text[i] == '\n') {
-                body += "<w:t xml:space=\"preserve\">" +
-                        xmlEscape(text.substr(start, i - start)) + "</w:t>";
-                if (i < text.size()) body += "<w:br/>";  // break between lines
+                if (!first) result += "</w:p><w:p>" + pPr;  // paragraph break
+                result += "<w:r>" + r + "<w:t xml:space=\"preserve\">" +
+                          xmlEscape(text.substr(start, i - start)) +
+                          "</w:t></w:r>";
+                first = false;
                 start = i + 1;
             }
         }
-        return "<w:r>" + r + body + "</w:r>";
+        return result;
     };
 
     std::string out;
