@@ -656,8 +656,21 @@ std::string transformParagraph(const std::string& inner, bool highlight) {
             r = "<w:rPr>" + rpr + "<w:highlight w:val=\"yellow\"/></w:rPr>";
         else if (!rpr.empty())
             r = "<w:rPr>" + rpr + "</w:rPr>";
-        return "<w:r>" + r + "<w:t xml:space=\"preserve\">" + xmlEscape(text) +
-               "</w:t></w:r>";
+        // Split the text on '\n' and put a <w:br/> between the pieces, so a
+        // newline in a substituted value becomes a real line break in Word (a
+        // raw '\n' inside a single <w:t> is otherwise ignored). Everything stays
+        // in ONE run, keeping the run's formatting/highlight.
+        std::string body;
+        size_t start = 0;
+        for (size_t i = 0; i <= text.size(); ++i) {
+            if (i == text.size() || text[i] == '\n') {
+                body += "<w:t xml:space=\"preserve\">" +
+                        xmlEscape(text.substr(start, i - start)) + "</w:t>";
+                if (i < text.size()) body += "<w:br/>";  // break between lines
+                start = i + 1;
+            }
+        }
+        return "<w:r>" + r + body + "</w:r>";
     };
 
     std::string out;
